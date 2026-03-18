@@ -1,0 +1,22 @@
+SMALLCASE DASHBOARD - Developer Notes
+======================================
+
+Project Structure:
+  app.py        - Main Streamlit UI (all pages, forms, charts)
+  database.py   - SQLite database layer (CRUD, rebalancing)
+  finance.py    - yfinance integration, calculations (XIRR, beta, etc.)
+  smallcase_data.db - SQLite database (auto-created)
+  launch_dashboard.bat - Desktop shortcut launcher
+
+Key Concepts:
+  - LIQUIDCASE is the residual/sweep holding (auto-rebalances to 100%)
+  - Units = (Weightage% x Investable Amount) / Buy Price
+  - "Add More" does weighted average pricing
+  - "Reduce Position" does partial sell + LIQUIDCASE rebalance
+
+To Run:
+  python -m streamlit run app.py --server.port 8503
+
+To Resume Claude Code Chat:
+  cd to this folder, then run: claude --resume
+  Or: claude --continue (picks up last conversation)
