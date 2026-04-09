@@ -5,3 +5,4 @@ yfinance>=0.2.30
 plotly>=5.18.0
 scipy>=1.11.0
 pyxirr>=0.9.0
+psycopg2-binary>=2.9.9
