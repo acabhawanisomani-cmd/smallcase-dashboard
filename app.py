@@ -16,36 +16,184 @@ import finance as fin
 
 st.set_page_config(
     page_title="Smallcase Dashboard",
-    page_icon="📊",
+    page_icon="🙏",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# ── Custom CSS ──────────────────────────────────────────────────────────────
+# ── Krishna-Themed Custom CSS ──────────────────────────────────────────────
 
 st.markdown("""
 <style>
-    .metric-card {
-        background: linear-gradient(135deg, #1e1e2e 0%, #2d2d44 100%);
-        border-radius: 12px; padding: 20px; text-align: center;
-        border: 1px solid #3d3d5c; margin-bottom: 10px;
+    /* ── Main background: Deep Krishna blue with subtle radial glow ── */
+    .stApp {
+        background: radial-gradient(ellipse at 20% 50%, #0a1628 0%, #060d1a 40%, #030812 100%) !important;
     }
-    .metric-card h3 { color: #a0a0c0; font-size: 13px; margin: 0; text-transform: uppercase; letter-spacing: 1px; }
-    .metric-card .value { font-size: 28px; font-weight: 700; margin: 8px 0 0; }
+    .stApp::before {
+        content: '';
+        position: fixed;
+        top: 0; left: 0; width: 100%; height: 100%;
+        background:
+            radial-gradient(circle at 85% 15%, rgba(212, 175, 55, 0.04) 0%, transparent 40%),
+            radial-gradient(circle at 10% 80%, rgba(0, 128, 128, 0.05) 0%, transparent 35%),
+            radial-gradient(circle at 50% 50%, rgba(30, 60, 114, 0.08) 0%, transparent 50%);
+        pointer-events: none;
+        z-index: 0;
+    }
+
+    /* ── Sidebar: Deep royal blue with gold top accent ── */
+    div[data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #0b1a3a 0%, #091225 40%, #060d1a 100%) !important;
+        border-right: 1px solid rgba(212, 175, 55, 0.15);
+    }
+    div[data-testid="stSidebar"]::before {
+        content: '';
+        position: absolute;
+        top: 0; left: 0; right: 0; height: 3px;
+        background: linear-gradient(90deg, #d4af37, #f0d060, #d4af37);
+    }
+
+    /* ── Metric cards: Peacock feather inspired gradient ── */
+    .metric-card {
+        background: linear-gradient(135deg, #0b1a3a 0%, #0f2244 50%, #112a4a 100%);
+        border-radius: 14px;
+        padding: 22px;
+        text-align: center;
+        border: 1px solid rgba(212, 175, 55, 0.2);
+        margin-bottom: 10px;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(212, 175, 55, 0.08);
+        position: relative;
+        overflow: hidden;
+    }
+    .metric-card::after {
+        content: '';
+        position: absolute;
+        top: 0; left: 0; right: 0; height: 2px;
+        background: linear-gradient(90deg, transparent, rgba(212, 175, 55, 0.5), transparent);
+    }
+    .metric-card h3 {
+        color: #c4a44a;
+        font-size: 12px;
+        margin: 0;
+        text-transform: uppercase;
+        letter-spacing: 1.5px;
+        font-weight: 600;
+    }
+    .metric-card .value {
+        font-size: 28px;
+        font-weight: 700;
+        margin: 10px 0 0;
+    }
+
+    /* ── P/L colors ── */
     .profit { color: #00e676 !important; }
     .loss { color: #ff5252 !important; }
-    .neutral { color: #ffffff !important; }
+    .neutral { color: #e8dcc8 !important; }
+
+    /* ── Warning flags ── */
     .flag-warning {
-        background: #ff52521a; border: 1px solid #ff5252; border-radius: 8px;
-        padding: 10px 15px; margin: 5px 0; color: #ff8a80;
+        background: rgba(255, 82, 82, 0.1);
+        border: 1px solid rgba(255, 82, 82, 0.4);
+        border-radius: 8px;
+        padding: 10px 15px;
+        margin: 5px 0;
+        color: #ff8a80;
     }
-    div[data-testid="stSidebar"] { background: #0e1117; }
+
+    /* ── Tab styling: Royal blue with gold hover ── */
     .stTabs [data-baseweb="tab-list"] { gap: 8px; }
     .stTabs [data-baseweb="tab"] {
-        background: #1e1e2e; border-radius: 8px 8px 0 0;
-        padding: 10px 20px; border: 1px solid #3d3d5c;
+        background: linear-gradient(135deg, #0b1a3a, #0f2244) !important;
+        border-radius: 10px 10px 0 0;
+        padding: 10px 20px;
+        border: 1px solid rgba(212, 175, 55, 0.15) !important;
+        color: #c4a44a !important;
+    }
+    .stTabs [data-baseweb="tab"]:hover {
+        border-color: rgba(212, 175, 55, 0.4) !important;
+        background: linear-gradient(135deg, #0f2244, #153060) !important;
+    }
+    .stTabs [aria-selected="true"] {
+        border-bottom: 2px solid #d4af37 !important;
+        color: #f0d060 !important;
+    }
+
+    /* ── Headings: Gold color ── */
+    h1, h2, h3 {
+        color: #e8dcc8 !important;
+    }
+    h1 { text-shadow: 0 0 30px rgba(212, 175, 55, 0.15); }
+
+    /* ── Data tables ── */
+    .stDataFrame {
+        border-radius: 10px;
+        overflow: hidden;
+        border: 1px solid rgba(212, 175, 55, 0.12) !important;
+    }
+
+    /* ── Buttons: Gold accent ── */
+    .stButton > button {
+        background: linear-gradient(135deg, #0f2244 0%, #1a3366 100%) !important;
+        border: 1px solid rgba(212, 175, 55, 0.3) !important;
+        color: #e8dcc8 !important;
+        border-radius: 8px;
+        transition: all 0.3s ease;
+    }
+    .stButton > button:hover {
+        border-color: #d4af37 !important;
+        box-shadow: 0 0 15px rgba(212, 175, 55, 0.2);
+        background: linear-gradient(135deg, #1a3366 0%, #244080 100%) !important;
+    }
+
+    /* ── Input fields ── */
+    .stTextInput input, .stNumberInput input, .stSelectbox div[data-baseweb="select"] {
+        border-color: rgba(212, 175, 55, 0.2) !important;
+    }
+    .stTextInput input:focus, .stNumberInput input:focus {
+        border-color: rgba(212, 175, 55, 0.5) !important;
+        box-shadow: 0 0 8px rgba(212, 175, 55, 0.15) !important;
+    }
+
+    /* ── Expander ── */
+    .streamlit-expanderHeader {
+        background: linear-gradient(135deg, #0b1a3a, #0f2244) !important;
+        border: 1px solid rgba(212, 175, 55, 0.15) !important;
+        border-radius: 10px !important;
+        color: #c4a44a !important;
+    }
+
+    /* ── Scrollbar ── */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #060d1a; }
+    ::-webkit-scrollbar-thumb { background: rgba(212, 175, 55, 0.3); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(212, 175, 55, 0.5); }
+
+    /* ── Radio buttons in sidebar ── */
+    div[data-testid="stSidebar"] .stRadio label {
+        color: #c4a44a !important;
+    }
+
+    /* ── Separator lines ── */
+    hr {
+        border-color: rgba(212, 175, 55, 0.12) !important;
+    }
+
+    /* ── Om symbol watermark ── */
+    .krishna-watermark {
+        position: fixed;
+        bottom: 20px;
+        right: 30px;
+        font-size: 60px;
+        opacity: 0.04;
+        color: #d4af37;
+        pointer-events: none;
+        z-index: 0;
+        font-family: serif;
     }
 </style>
+
+<!-- Subtle Om watermark -->
+<div class="krishna-watermark">&#x0950;</div>
 """, unsafe_allow_html=True)
 
 
@@ -134,7 +282,19 @@ def build_holdings_table(holdings_df: pd.DataFrame, total_amount: float,
 
 # ── Sidebar ─────────────────────────────────────────────────────────────────
 
-st.sidebar.title("⚡ Smallcase Manager")
+st.sidebar.markdown("""
+<div style="text-align:center; padding: 10px 0 5px;">
+    <span style="font-size: 36px;">🙏</span>
+    <h2 style="margin: 5px 0 0; color: #d4af37 !important; font-size: 22px;
+               text-shadow: 0 0 20px rgba(212,175,55,0.2);">
+        Smallcase Manager
+    </h2>
+    <p style="color: rgba(212,175,55,0.5); font-size: 11px; margin: 2px 0 0;
+              letter-spacing: 2px;">
+        कर्मण्येवाधिकारस्ते
+    </p>
+</div>
+""", unsafe_allow_html=True)
 
 # Create new smallcase
 with st.sidebar.expander("➕ Create New Smallcase", expanded=False):
@@ -242,14 +402,14 @@ def render_master_dashboard():
             st.subheader("Smallcase Performance")
             sum_df = pd.DataFrame(sc_summaries)
             st.dataframe(
-                sum_df.style.applymap(color_pnl, subset=["P/L", "P/L %"])
+                sum_df.style.map(color_pnl, subset=["P/L", "P/L %"])
                      .format({
                          "Invested": "₹{:,.0f}",
                          "Market Value": "₹{:,.0f}",
                          "P/L": "₹{:,.0f}",
                          "P/L %": "{:.2f}%",
                      }),
-                use_container_width=True, hide_index=True,
+                width="stretch", hide_index=True,
             )
 
         with col_right:
@@ -270,7 +430,7 @@ def render_master_dashboard():
                     showlegend=True,
                     legend=dict(font=dict(size=10)),
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
     # Capital allocation bar chart
     if sc_summaries:
@@ -295,7 +455,7 @@ def render_master_dashboard():
             xaxis=dict(showgrid=False),
             yaxis=dict(showgrid=True, gridcolor="#2d2d44"),
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
 
 # ── Individual Smallcase View ──────────────────────────────────────────────
@@ -342,12 +502,26 @@ def render_smallcase(sc: dict):
     with col_s3:
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button("🔄 Refresh Prices", key=f"refresh_{sc_id}"):
-            fin._price_cache.clear()
-            fin._cache_time = 0
+            st.cache_data.clear()
             st.rerun()
     with col_s4:
         st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("🗑️ Delete Smallcase", key=f"del_{sc_id}"):
+        if st.button("🧮 Recalc Units", key=f"recalc_{sc_id}",
+                     help="Recalculate units for ALL holdings: (weightage% × Investable Amount) / buy_price. "
+                          "Use this when Invested Amount doesn't match the smallcase platform."):
+            _h = db.get_holdings(sc_id)
+            if not _h.empty:
+                updated = 0
+                for _, h in _h.iterrows():
+                    if h["buy_price"] > 0 and h["weightage"] > 0:
+                        new_units = round((h["weightage"] / 100 * new_amount) / h["buy_price"], 4)
+                        db.update_holding(int(h["id"]), units=new_units)
+                        updated += 1
+                st.success(f"Recalculated units for {updated} holdings against ₹{new_amount:,.2f}")
+                st.rerun()
+    with col_s5:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("🗑️ Delete", key=f"del_{sc_id}"):
             db.delete_smallcase(sc_id)
             st.rerun()
 
@@ -387,27 +561,43 @@ def render_smallcase(sc: dict):
         if looked_up:
             st.success(f"Found: **{default_name}** — {default_industry}")
 
-        # Step 2: Form with pre-filled values
+        # Step 2: Date picker outside form for auto-price fetch
+        add_buy_date = st.date_input("Date of Buy (open price auto-fetched)",
+                                      value=date.today(), key=f"add_date_{sc_id}")
+        add_date_str = add_buy_date.strftime("%Y-%m-%d")
+
+        # Auto-fetch opening price if we have a ticker
+        add_fetched_price = 0.0
+        add_liq_fetched = 0.0
+        if looked_up.get("ticker"):
+            add_fetched_price = fin.fetch_open_price(looked_up["ticker"], add_date_str) or 0.0
+            add_liq_fetched = fin.fetch_open_price(db.RESIDUAL_TICKER, add_date_str) or 0.0
+            if add_fetched_price > 0:
+                st.success(f"📈 Opening price of **{looked_up['ticker']}** on **{add_date_str}**: **₹{add_fetched_price:,.2f}**")
+            else:
+                st.warning(f"Could not fetch price for {looked_up['ticker']} on {add_date_str}. Enter manually.")
+
+        # Step 3: Form with pre-filled values
         with st.form(f"add_stock_{sc_id}"):
-            c1, c2, c3 = st.columns(3)
+            c1, c2 = st.columns(2)
             with c1:
                 scrip_name = st.text_input("Scrip Name", value=default_name)
                 industry = st.text_input("Industry / Sector", value=default_industry)
-            with c2:
                 weightage = st.number_input("Target Weightage %", 0.0, 100.0, 5.0, 0.5)
-                buy_price = st.number_input("Buy Price (₹)", 0.0, step=0.5)
-            with c3:
-                buy_date = st.date_input("Date of Buy", value=date.today())
+            with c2:
+                buy_price = st.number_input("Buy Price (₹)", 0.0, step=0.5,
+                                             value=float(add_fetched_price),
+                                             help="Auto-filled with opening price. Override if needed.")
                 auto_calc = st.checkbox("Auto-calculate Units from Weightage", value=True)
-
-            if not auto_calc:
-                manual_units = st.number_input("Manual Units", 0.0, step=1.0)
+                if not auto_calc:
+                    manual_units = st.number_input("Manual Units", 0.0, step=1.0)
 
             liq_exit_price = st.number_input(
-                "LIQUIDCASE exit price (₹) — for auto-rebalancing",
-                min_value=0.0, step=0.1, value=0.0,
+                "LIQUIDCASE exit price (₹) — auto-fetched",
+                min_value=0.0, step=0.1,
+                value=float(add_liq_fetched),
                 key=f"add_liq_ep_{sc_id}",
-                help="If adding this stock reduces LIQUIDCASE allocation, enter the price you sold LIQUIDCASE units at. Leave 0 to use buy price."
+                help="Auto-filled with LIQUIDCASE opening price on same date. Override if needed."
             )
 
             add_submitted = st.form_submit_button("Add Stock")
@@ -426,7 +616,7 @@ def render_smallcase(sc: dict):
                     industry=industry,
                     weightage=weightage,
                     buy_price=buy_price,
-                    buy_date=buy_date.strftime("%Y-%m-%d"),
+                    buy_date=add_date_str,
                     units=units,
                 )
 
@@ -443,10 +633,392 @@ def render_smallcase(sc: dict):
                 st.success(f"Added {ticker_clean} — {units} units")
                 st.rerun()
 
+    # ── CSV Upload & Rebalance ─────────────────────────────────────────────
+    with st.expander("📤 Upload CSV to Rebalance", expanded=False):
+        st.markdown("Upload your smallcase CSV to automatically rebalance the portfolio. "
+                     "Format: `NSE Ticker, Weight, Segment (optional), Rationale (optional)`")
+        st.markdown("> **How it works:** The system uses the **current portfolio market value** "
+                     "as the rebalance base (just like the actual smallcase platform). "
+                     "Buy/Sell happens at the opening price of the execution date.")
+
+        uploaded_file = st.file_uploader("Upload CSV", type=["csv"], key=f"csv_{sc_id}")
+
+        if uploaded_file:
+            try:
+                csv_df = pd.read_csv(uploaded_file)
+                # Normalize column names
+                col_map = {}
+                for c in csv_df.columns:
+                    cl = c.strip().lower()
+                    if "ticker" in cl:
+                        col_map[c] = "ticker"
+                    elif "weight" in cl:
+                        col_map[c] = "weight"
+                    elif "segment" in cl or "sector" in cl:
+                        col_map[c] = "segment"
+                    elif "rationale" in cl:
+                        col_map[c] = "rationale"
+                csv_df = csv_df.rename(columns=col_map)
+
+                if "ticker" not in csv_df.columns or "weight" not in csv_df.columns:
+                    st.error("CSV must have 'NSE Ticker' and 'Weight' columns.")
+                else:
+                    csv_df["ticker"] = csv_df["ticker"].str.strip().str.upper()
+                    csv_df["weight"] = pd.to_numeric(csv_df["weight"], errors="coerce").fillna(0)
+
+                    # Get current holdings and compute current market value
+                    curr_holdings = db.get_holdings(sc_id)
+                    curr_map = {}
+                    current_market_value = 0.0
+                    if not curr_holdings.empty:
+                        # Build table to get live market values
+                        _temp_table = build_holdings_table(curr_holdings, total_amount)
+                        if not _temp_table.empty:
+                            current_market_value = round(_temp_table["Market Value"].sum(), 2)
+
+                        for _, h in curr_holdings.iterrows():
+                            # Get live price from temp table
+                            live_row = _temp_table[_temp_table["Ticker"] == h["ticker"]] if not _temp_table.empty else pd.DataFrame()
+                            live_price = float(live_row["Current Price"].iloc[0]) if not live_row.empty else h["buy_price"]
+
+                            curr_map[h["ticker"]] = {
+                                "id": h["id"], "weight": h["weightage"],
+                                "units": h["units"], "buy_price": h["buy_price"],
+                                "scrip_name": h["scrip_name"], "industry": h["industry"],
+                                "buy_date": h["buy_date"],
+                                "current_price": live_price,
+                                "market_value": h["units"] * live_price,
+                            }
+
+                    # Show rebalance base amount
+                    st.markdown("### 💰 Rebalance Base Amount")
+                    st.markdown("All new unit calculations will be based on this amount. "
+                                "**Default = your Total Investable Amount.** Override only if "
+                                "the smallcase platform shows a different value (e.g., after market movement).")
+
+                    # Default to Total Investable Amount (not market value)
+                    # because market value can be stale if existing units are wrong
+                    default_base = total_amount if total_amount > 0 else current_market_value
+
+                    rb_c1, rb_c2 = st.columns([2, 1])
+                    with rb_c1:
+                        rebalance_base = st.number_input(
+                            "Rebalance Base Amount (₹)",
+                            value=float(default_base),
+                            min_value=0.0, step=100.0,
+                            key=f"rebal_base_{sc_id}",
+                            help="Defaults to Total Investable Amount. Override if smallcase platform shows a different value."
+                        )
+                    with rb_c2:
+                        st.metric("Set Investable Amount", f"₹{total_amount:,.2f}")
+                        st.metric("Current Market Value", f"₹{current_market_value:,.2f}")
+
+                    csv_map = {}
+                    for _, r in csv_df.iterrows():
+                        csv_map[r["ticker"]] = {
+                            "weight": round(r["weight"], 2),
+                            "segment": r.get("segment", ""),
+                        }
+
+                    # Build diff table
+                    all_tickers = sorted(set(list(curr_map.keys()) + list(csv_map.keys())))
+                    diff_rows = []
+                    for t in all_tickers:
+                        old_wt = curr_map.get(t, {}).get("weight", 0)
+                        new_wt = csv_map.get(t, {}).get("weight", 0)
+                        change = round(new_wt - old_wt, 2)
+
+                        if t not in curr_map and new_wt > 0:
+                            action = "NEW BUY"
+                        elif t not in csv_map or new_wt == 0:
+                            action = "EXIT"
+                        elif change > 0.01:
+                            action = "ADD MORE"
+                        elif change < -0.01:
+                            action = "REDUCE"
+                        else:
+                            action = "NO CHANGE"
+
+                        # Calculate expected units based on rebalance base
+                        old_units = curr_map.get(t, {}).get("units", 0)
+                        old_mkt_val = curr_map.get(t, {}).get("market_value", 0)
+
+                        diff_rows.append({
+                            "Ticker": t,
+                            "Current Wt%": old_wt,
+                            "New Wt%": new_wt,
+                            "Change": change,
+                            "Action": action,
+                            "Current Units": round(old_units, 2),
+                            "Current Value": round(old_mkt_val, 0),
+                            "Target Value": round(new_wt / 100 * rebalance_base, 0),
+                        })
+
+                    diff_df = pd.DataFrame(diff_rows)
+
+                    # Show diff with color coding
+                    st.markdown("### Rebalance Preview")
+
+                    def color_action(val):
+                        colors = {
+                            "NEW BUY": "color: #00e676; font-weight: bold",
+                            "ADD MORE": "color: #69f0ae",
+                            "REDUCE": "color: #ffca28",
+                            "EXIT": "color: #ff5252; font-weight: bold",
+                            "NO CHANGE": "color: #888",
+                        }
+                        return colors.get(val, "")
+
+                    st.dataframe(
+                        diff_df.style
+                            .map(color_action, subset=["Action"])
+                            .map(color_pnl, subset=["Change"])
+                            .format({
+                                "Current Wt%": "{:.1f}%", "New Wt%": "{:.1f}%", "Change": "{:+.1f}%",
+                                "Current Units": "{:.2f}", "Current Value": "₹{:,.0f}", "Target Value": "₹{:,.0f}",
+                            }),
+                        width="stretch", hide_index=True,
+                    )
+
+                    changes = diff_df[diff_df["Action"] != "NO CHANGE"]
+                    if changes.empty:
+                        st.success("Portfolio already matches the CSV. No changes needed.")
+                    else:
+                        st.markdown("---")
+                        st.markdown("**Execution Settings**")
+                        st.markdown("> Buy/Sell prices = **opening price of the execution date** (next trading day).")
+
+                        exec_date = st.date_input(
+                            "Execution Date (next trading day)",
+                            value=date.today(),
+                            key=f"exec_date_{sc_id}",
+                        )
+                        exec_date_str = exec_date.strftime("%Y-%m-%d")
+
+                        # Option to auto-fetch or manual prices
+                        price_mode = st.radio(
+                            "Price Mode",
+                            ["Auto-fetch opening prices", "I'll enter prices manually"],
+                            key=f"price_mode_{sc_id}",
+                        )
+
+                        fetched_prices = {}
+                        if price_mode == "Auto-fetch opening prices":
+                            action_tickers = changes["Ticker"].tolist()
+                            if st.button("Fetch Opening Prices", key=f"fetch_op_{sc_id}"):
+                                with st.spinner("Fetching opening prices..."):
+                                    fetched_prices = fin.fetch_opening_prices_batch(
+                                        tuple(action_tickers), exec_date_str
+                                    )
+                                    st.session_state[f"fetched_prices_{sc_id}"] = fetched_prices
+
+                            fetched_prices = st.session_state.get(f"fetched_prices_{sc_id}", {})
+                            if fetched_prices:
+                                price_df = pd.DataFrame([
+                                    {"Ticker": t, "Opening Price": f"₹{p:,.2f}" if p else "N/A"}
+                                    for t, p in fetched_prices.items()
+                                ])
+                                st.dataframe(price_df, width="stretch", hide_index=True)
+
+                                missing = [t for t, p in fetched_prices.items() if p is None]
+                                if missing:
+                                    st.warning(f"Could not fetch prices for: {', '.join(missing)}. "
+                                              f"Enter manually below or try a different date.")
+
+                        # Manual price overrides
+                        manual_prices = {}
+                        need_manual = []
+                        for _, row in changes.iterrows():
+                            t = row["Ticker"]
+                            fp = fetched_prices.get(t)
+                            if price_mode == "I'll enter prices manually" or fp is None:
+                                need_manual.append(t)
+
+                        if need_manual:
+                            st.markdown("**Enter prices manually:**")
+                            cols = st.columns(min(3, len(need_manual)))
+                            for i, t in enumerate(need_manual):
+                                with cols[i % len(cols)]:
+                                    manual_prices[t] = st.number_input(
+                                        f"{t} price (₹)", 0.0, step=0.5,
+                                        key=f"mp_{sc_id}_{t}",
+                                    )
+
+                        # Merge prices: fetched + manual overrides
+                        final_prices = {**fetched_prices, **{t: p for t, p in manual_prices.items() if p > 0}}
+
+                        # Apply button
+                        all_priced = all(final_prices.get(row["Ticker"]) and final_prices[row["Ticker"]] > 0
+                                         for _, row in changes.iterrows())
+
+                        if all_priced:
+                            # Show what will happen with exact unit calculations
+                            st.markdown("### 📋 Execution Summary")
+                            exec_rows = []
+                            for _, row in changes.iterrows():
+                                t = row["Ticker"]
+                                action = row["Action"]
+                                new_wt = row["New Wt%"]
+                                price = final_prices[t]
+                                target_value = new_wt / 100 * rebalance_base
+                                target_units = round(target_value / price, 4) if price > 0 else 0
+
+                                if action == "NEW BUY":
+                                    exec_rows.append({"Ticker": t, "Action": action,
+                                        "Units": f"+{target_units:.4f}", "Price": f"₹{price:,.2f}",
+                                        "Amount": f"₹{target_value:,.2f}"})
+                                elif action == "EXIT":
+                                    h = curr_map[t]
+                                    exec_rows.append({"Ticker": t, "Action": action,
+                                        "Units": f"-{h['units']:.4f}", "Price": f"₹{price:,.2f}",
+                                        "Amount": f"₹{h['units'] * price:,.2f}"})
+                                elif action == "ADD MORE":
+                                    h = curr_map[t]
+                                    add_units = round(target_units - h["units"], 4)
+                                    if add_units > 0:
+                                        exec_rows.append({"Ticker": t, "Action": f"BUY +{row['Change']:.1f}%",
+                                            "Units": f"+{add_units:.4f}", "Price": f"₹{price:,.2f}",
+                                            "Amount": f"₹{add_units * price:,.2f}"})
+                                    else:
+                                        exec_rows.append({"Ticker": t, "Action": f"SELL {row['Change']:.1f}%",
+                                            "Units": f"{add_units:.4f}", "Price": f"₹{price:,.2f}",
+                                            "Amount": f"₹{abs(add_units) * price:,.2f}"})
+                                elif action == "REDUCE":
+                                    h = curr_map[t]
+                                    sell_units = round(h["units"] - target_units, 4)
+                                    exec_rows.append({"Ticker": t, "Action": f"SELL {abs(row['Change']):.1f}%",
+                                        "Units": f"-{sell_units:.4f}", "Price": f"₹{price:,.2f}",
+                                        "Amount": f"₹{sell_units * price:,.2f}"})
+
+                            exec_df = pd.DataFrame(exec_rows)
+                            st.dataframe(exec_df.style.map(color_action, subset=["Action"]),
+                                         width="stretch", hide_index=True)
+
+                            if st.button("✅ Apply Rebalance", key=f"apply_rebal_{sc_id}", type="primary"):
+                                applied = []
+                                for _, row in changes.iterrows():
+                                    t = row["Ticker"]
+                                    action = row["Action"]
+                                    new_wt = row["New Wt%"]
+                                    price = final_prices[t]
+
+                                    # Calculate target units based on rebalance base
+                                    target_value = new_wt / 100 * rebalance_base
+                                    target_units = round(target_value / price, 4) if price > 0 else 0
+
+                                    if action == "NEW BUY":
+                                        # Fetch stock info for name/industry
+                                        info = fin.fetch_stock_info(t)
+                                        segment = csv_map.get(t, {}).get("segment", "")
+                                        industry = segment if segment else (
+                                            f"{info['sector']} / {info['industry']}" if info["sector"] else info["industry"]
+                                        )
+                                        db.add_holding(
+                                            smallcase_id=sc_id,
+                                            ticker=t,
+                                            scrip_name=info.get("long_name", t),
+                                            industry=industry,
+                                            weightage=new_wt,
+                                            buy_price=price,
+                                            buy_date=exec_date_str,
+                                            units=target_units,
+                                        )
+                                        applied.append(f"BUY {t}: {new_wt}% @ ₹{price:,.2f} ({target_units:.4f} units)")
+
+                                    elif action == "EXIT":
+                                        h = curr_map[t]
+                                        db.exit_holding(h["id"], price, exec_date_str)
+                                        applied.append(f"EXIT {t}: sold {h['units']:.4f} units @ ₹{price:,.2f}")
+
+                                    elif action == "ADD MORE":
+                                        h = curr_map[t]
+                                        old_units = h["units"]
+                                        old_bp = h["buy_price"]
+                                        add_units = round(target_units - old_units, 4)
+
+                                        if add_units > 0:
+                                            # Buying more — average up/down
+                                            total_units = round(old_units + add_units, 4)
+                                            avg_price = round(
+                                                (old_units * old_bp + add_units * price) / total_units, 2
+                                            ) if total_units > 0 else price
+
+                                            db.update_holding(h["id"],
+                                                              weightage=new_wt,
+                                                              units=total_units,
+                                                              buy_price=avg_price)
+
+                                            conn = db.get_connection()
+                                            conn.execute(
+                                                "INSERT INTO transactions (holding_id, smallcase_id, ticker, action, units, price, transaction_date) "
+                                                "VALUES (?, ?, ?, 'BUY', ?, ?, ?)",
+                                                (h["id"], sc_id, t, add_units, price, exec_date_str)
+                                            )
+                                            conn.commit()
+                                            conn.close()
+                                            applied.append(f"ADD {t}: +{add_units:.4f} units @ ₹{price:,.2f}, avg ₹{avg_price:,.2f}")
+                                        else:
+                                            # Actually need to sell (market moved, target units < current)
+                                            sell_units = abs(add_units)
+                                            new_total = round(old_units - sell_units, 4)
+                                            db.update_holding(h["id"],
+                                                              weightage=new_wt,
+                                                              units=new_total)
+
+                                            conn = db.get_connection()
+                                            conn.execute(
+                                                "INSERT INTO transactions (holding_id, smallcase_id, ticker, action, units, price, transaction_date) "
+                                                "VALUES (?, ?, ?, 'SELL', ?, ?, ?)",
+                                                (h["id"], sc_id, t, sell_units, price, exec_date_str)
+                                            )
+                                            conn.commit()
+                                            conn.close()
+                                            applied.append(f"ADJUST {t}: sold {sell_units:.4f} units @ ₹{price:,.2f} (market value adjustment)")
+
+                                    elif action == "REDUCE":
+                                        h = curr_map[t]
+                                        old_units = h["units"]
+                                        sell_units = round(old_units - target_units, 4)
+
+                                        db.update_holding(h["id"],
+                                                          weightage=new_wt,
+                                                          units=target_units)
+
+                                        conn = db.get_connection()
+                                        conn.execute(
+                                            "INSERT INTO transactions (holding_id, smallcase_id, ticker, action, units, price, transaction_date) "
+                                            "VALUES (?, ?, ?, 'SELL', ?, ?, ?)",
+                                            (h["id"], sc_id, t, sell_units, price, exec_date_str)
+                                        )
+                                        conn.commit()
+                                        conn.close()
+                                        applied.append(f"REDUCE {t}: {h['weight']}% → {new_wt}%, sold {sell_units:.4f} units @ ₹{price:,.2f}")
+
+                                # Update investable amount to rebalance base
+                                db.update_smallcase(sc_id, total_investable_amount=rebalance_base)
+
+                                # Clear cached prices
+                                st.session_state.pop(f"fetched_prices_{sc_id}", None)
+                                st.cache_data.clear()
+
+                                st.success(f"✅ Rebalance applied! Investable amount updated to ₹{rebalance_base:,.2f}")
+                                for a in applied:
+                                    st.markdown(f"- {a}")
+                                st.rerun()
+                        else:
+                            missing_prices = [row["Ticker"] for _, row in changes.iterrows()
+                                              if not (final_prices.get(row["Ticker"]) and final_prices[row["Ticker"]] > 0)]
+                            st.warning(f"Enter prices for: {', '.join(missing_prices)} before applying.")
+
+            except Exception as e:
+                st.error(f"Error reading CSV: {e}")
+                import traceback
+                st.code(traceback.format_exc())
+
     # ── Holdings Table ──────────────────────────────────────────────────────
     holdings = db.get_holdings(sc_id)
     if holdings.empty:
-        st.info("No stocks added yet. Use the form above to add holdings.")
+        st.info("No stocks added yet. Use the form above or upload a CSV to add holdings.")
         return
 
     table = build_holdings_table(holdings, total_amount, is_design)
@@ -480,15 +1052,15 @@ def render_smallcase(sc: dict):
 
     # Main holdings table
     st.subheader("Holdings")
-    display_cols = ["Scrip Name", "Ticker", "Industry", "Weightage %", "Units",
-                    "Buy Date", "Buy Price", "Current Price", "Invested Amount",
+    display_cols = ["Scrip Name", "Ticker", "Weightage %", "Units",
+                    "Buy Price", "Current Price", "Invested Amount",
                     "Market Value", "P/L", "P/L %", "Days Held", "XIRR %",
-                    "Today Chg", "% Chg"]
+                    "Today Chg", "% Chg", "Buy Date", "Industry"]
     display_df = table[display_cols].copy()
 
     st.dataframe(
         display_df.style
-            .applymap(color_pnl, subset=["P/L", "P/L %", "Today Chg", "% Chg"])
+            .map(color_pnl, subset=["P/L", "P/L %", "Today Chg", "% Chg"])
             .format({
                 "Weightage %": "{:.1f}%",
                 "Units": "{:.2f}",
@@ -501,7 +1073,7 @@ def render_smallcase(sc: dict):
                 "Today Chg": "₹{:,.2f}",
                 "% Chg": "{:.2f}%",
             }),
-        use_container_width=True, hide_index=True, height=min(400, 50 + 35 * len(display_df)),
+        width="stretch", hide_index=True, height=min(400, 50 + 35 * len(display_df)),
     )
 
     # ── Edit / Delete / Exit Actions ────────────────────────────────────────
@@ -596,14 +1168,15 @@ def render_smallcase(sc: dict):
     with tab_add_more:
         st.markdown("**Add more quantity to an existing position (average up/down)**")
         st.markdown(
-            "> Use this when you increase weightage of a stock at a different price. "
-            "The system will calculate new total units and weighted average buy price."
+            "> Pick a date → opening price is auto-fetched. "
+            "The system calculates new total units and weighted average buy price."
         )
         if stock_options:
             sel_avg = st.selectbox("Select stock to add more", list(stock_options.keys()),
                                    key=f"avg_sel_{sc_id}")
             h_id_avg = stock_options[sel_avg]
             sel_row_avg, cur_avg = _stock_summary(h_id_avg)
+            avg_ticker = sel_row_avg["Ticker"]
 
             st.caption(
                 f"Current: Weightage **{cur_avg['wt']}%** · "
@@ -611,6 +1184,21 @@ def render_smallcase(sc: dict):
                 f"Units **{cur_avg['units']:.2f}** · "
                 f"Invested **₹{cur_avg['inv']:,.2f}**"
             )
+
+            # Date picker OUTSIDE form — triggers auto-fetch
+            avg_date = st.date_input("Date of Buy (open price auto-fetched)",
+                                      value=date.today(), key=f"adate_{sc_id}")
+            avg_date_str = avg_date.strftime("%Y-%m-%d")
+
+            # Auto-fetch opening price for the selected date
+            fetched_avg_price = fin.fetch_open_price(avg_ticker, avg_date_str) or 0.0
+            if fetched_avg_price > 0:
+                st.success(f"📈 Opening price of **{avg_ticker}** on **{avg_date_str}**: **₹{fetched_avg_price:,.2f}**")
+            else:
+                st.warning(f"Could not fetch price for {avg_ticker} on {avg_date_str}. Enter manually below.")
+
+            # Also fetch LIQUIDCASE price for same date
+            liq_price_avg = fin.fetch_open_price(db.RESIDUAL_TICKER, avg_date_str) or 0.0
 
             with st.form(f"avg_form_{sc_id}_{h_id_avg}"):
                 ac1, ac2 = st.columns(2)
@@ -623,8 +1211,9 @@ def render_smallcase(sc: dict):
                 with ac2:
                     add_bp = st.number_input(
                         "Buy Price for new tranche (₹)", 0.0, step=0.5,
+                        value=float(fetched_avg_price),
                         key=f"abp_{sc_id}_{h_id_avg}",
-                        help="Price at which you bought the additional quantity"
+                        help="Auto-filled with opening price. Override if needed."
                     )
 
                 # Preview
@@ -650,10 +1239,11 @@ def render_smallcase(sc: dict):
                 liq_ep_avg = 0.0
                 if sel_row_avg["Ticker"] != db.RESIDUAL_TICKER:
                     liq_ep_avg = st.number_input(
-                        "LIQUIDCASE exit price (₹) — for auto-rebalance",
-                        min_value=0.0, step=0.1, value=0.0,
+                        "LIQUIDCASE exit price (₹) — auto-fetched",
+                        min_value=0.0, step=0.1,
+                        value=float(liq_price_avg),
                         key=f"aliq_{sc_id}_{h_id_avg}",
-                        help="Price at which LIQUIDCASE units are sold to fund this increase. Leave 0 to use buy price."
+                        help="Auto-filled with LIQUIDCASE opening price on same date. Override if needed."
                     )
 
                 if st.form_submit_button("Add & Average"):
@@ -671,6 +1261,16 @@ def render_smallcase(sc: dict):
                                           weightage=new_total_wt,
                                           units=new_total_units,
                                           buy_price=new_avg_price)
+
+                        # Log the BUY transaction
+                        conn = db.get_connection()
+                        conn.execute(
+                            "INSERT INTO transactions (holding_id, smallcase_id, ticker, action, units, price, transaction_date) "
+                            "VALUES (?, ?, ?, 'BUY', ?, ?, ?)",
+                            (h_id_avg, sc_id, avg_ticker, add_units, add_bp, avg_date_str)
+                        )
+                        conn.commit()
+                        conn.close()
 
                         # Auto-rebalance LIQUIDCASE
                         if sel_row_avg["Ticker"] != db.RESIDUAL_TICKER:
@@ -690,7 +1290,7 @@ def render_smallcase(sc: dict):
     with tab_reduce:
         st.markdown("**Reduce weightage of a stock (partial sell)**")
         st.markdown(
-            "> Sell some units to lower a stock's allocation. "
+            "> Pick a date → opening price is auto-fetched as exit price. "
             "The freed weightage automatically flows back to LIQUIDCASE."
         )
         if stock_options:
@@ -703,6 +1303,7 @@ def render_smallcase(sc: dict):
                                        key=f"red_sel_{sc_id}")
                 h_id_red = reduce_options[sel_red]
                 sel_row_red, cur_red = _stock_summary(h_id_red)
+                red_ticker = sel_row_red["Ticker"]
 
                 st.caption(
                     f"Current: Weightage **{cur_red['wt']}%** · "
@@ -710,6 +1311,21 @@ def render_smallcase(sc: dict):
                     f"Units **{cur_red['units']:.2f}** · "
                     f"Invested **₹{cur_red['inv']:,.2f}**"
                 )
+
+                # Date picker OUTSIDE form — triggers auto-fetch
+                red_date = st.date_input("Date of Reduction (open price auto-fetched)",
+                                          value=date.today(), key=f"rdt_{sc_id}")
+                red_date_str = red_date.strftime("%Y-%m-%d")
+
+                # Auto-fetch opening price
+                fetched_red_price = fin.fetch_open_price(red_ticker, red_date_str) or 0.0
+                if fetched_red_price > 0:
+                    st.success(f"📉 Opening price of **{red_ticker}** on **{red_date_str}**: **₹{fetched_red_price:,.2f}**")
+                else:
+                    st.warning(f"Could not fetch price for {red_ticker} on {red_date_str}. Enter manually below.")
+
+                # Also fetch LIQUIDCASE price for same date
+                liq_price_red = fin.fetch_open_price(db.RESIDUAL_TICKER, red_date_str) or 0.0
 
                 with st.form(f"reduce_form_{sc_id}_{h_id_red}"):
                     rc1, rc2 = st.columns(2)
@@ -723,12 +1339,10 @@ def render_smallcase(sc: dict):
                     with rc2:
                         red_exit_price = st.number_input(
                             "Exit Price for sold units (₹)", 0.0, step=0.5,
+                            value=float(fetched_red_price),
                             key=f"rep_{sc_id}_{h_id_red}",
-                            help="The price at which you sold the excess units"
+                            help="Auto-filled with opening price. Override if needed."
                         )
-
-                    red_date = st.date_input("Date of Reduction", value=date.today(),
-                                             key=f"rdt_{sc_id}_{h_id_red}")
 
                     # Preview
                     wt_diff = cur_red["wt"] - new_wt_red
@@ -766,14 +1380,15 @@ def render_smallcase(sc: dict):
                             conn.execute(
                                 "INSERT INTO transactions (holding_id, smallcase_id, ticker, action, units, price, transaction_date) "
                                 "VALUES (?, ?, ?, 'SELL', ?, ?, ?)",
-                                (h_id_red, sc_id, sel_row_red["Ticker"], sold_units,
-                                 red_exit_price, red_date.strftime("%Y-%m-%d"))
+                                (h_id_red, sc_id, red_ticker, sold_units,
+                                 red_exit_price, red_date_str)
                             )
                             conn.commit()
                             conn.close()
 
                             # Auto-rebalance LIQUIDCASE (freed weightage flows back)
-                            rb = db.rebalance_residual(sc_id, total_amount)
+                            rb = db.rebalance_residual(sc_id, total_amount,
+                                                       exit_price=liq_price_red if liq_price_red > 0 else None)
                             if rb:
                                 st.info(
                                     f"🔄 LIQUIDCASE: {rb['old_wt']:.1f}% → {rb['new_wt']:.1f}% "
@@ -781,7 +1396,7 @@ def render_smallcase(sc: dict):
                                 )
 
                             st.success(
-                                f"Reduced {sel_row_red['Ticker']}: "
+                                f"Reduced {red_ticker}: "
                                 f"{cur_red['wt']:.1f}% → {new_wt_red:.1f}% · "
                                 f"Sold {sold_units:.2f} units @ ₹{red_exit_price:,.2f}"
                             )
@@ -794,19 +1409,39 @@ def render_smallcase(sc: dict):
             sel_exit = st.selectbox("Select stock to exit", list(stock_options.keys()), key=f"exit_sel_{sc_id}")
             h_id_exit = stock_options[sel_exit]
             exit_row = table[table["ID"] == h_id_exit].iloc[0]
+            exit_ticker = exit_row["Ticker"]
+
+            # Date picker OUTSIDE form — triggers auto-fetch
+            exit_date = st.date_input("Exit Date (open price auto-fetched)",
+                                       value=date.today(), key=f"exd_{sc_id}")
+            exit_date_str = exit_date.strftime("%Y-%m-%d")
+
+            fetched_exit_price = fin.fetch_open_price(exit_ticker, exit_date_str) or 0.0
+            if fetched_exit_price > 0:
+                st.success(f"📉 Opening price of **{exit_ticker}** on **{exit_date_str}**: **₹{fetched_exit_price:,.2f}**")
+            else:
+                st.warning(f"Could not fetch price for {exit_ticker} on {exit_date_str}. Enter manually below.")
+
             with st.form(f"exit_form_{sc_id}"):
-                exit_price = st.number_input("Exit Price (₹)", 0.0, key=f"exp_{sc_id}")
-                exit_date = st.date_input("Exit Date", value=date.today(), key=f"exd_{sc_id}")
+                exit_price = st.number_input("Exit Price (₹)", 0.0,
+                                              value=float(fetched_exit_price),
+                                              key=f"exp_{sc_id}",
+                                              help="Auto-filled with opening price. Override if needed.")
                 if st.form_submit_button("Exit Position"):
-                    db.exit_holding(h_id_exit, exit_price, exit_date.strftime("%Y-%m-%d"))
-                    # Auto-rebalance LIQUIDCASE (freed weightage goes back)
-                    if exit_row["Ticker"] != db.RESIDUAL_TICKER:
-                        rb = db.rebalance_residual(sc_id, total_amount)
-                        if rb:
-                            st.info(f"🔄 LIQUIDCASE: {rb['old_wt']:.1f}% → {rb['new_wt']:.1f}% "
-                                    f"({rb['delta_units']:+.2f} units)")
-                    st.success("Position exited!")
-                    st.rerun()
+                    if exit_price <= 0:
+                        st.error("Please enter a valid exit price.")
+                    else:
+                        db.exit_holding(h_id_exit, exit_price, exit_date_str)
+                        # Auto-rebalance LIQUIDCASE (freed weightage goes back)
+                        if exit_ticker != db.RESIDUAL_TICKER:
+                            liq_price_exit = fin.fetch_open_price(db.RESIDUAL_TICKER, exit_date_str) or 0.0
+                            rb = db.rebalance_residual(sc_id, total_amount,
+                                                       exit_price=liq_price_exit if liq_price_exit > 0 else None)
+                            if rb:
+                                st.info(f"🔄 LIQUIDCASE: {rb['old_wt']:.1f}% → {rb['new_wt']:.1f}% "
+                                        f"({rb['delta_units']:+.2f} units)")
+                        st.success("Position exited!")
+                        st.rerun()
 
     with tab_delete:
         if stock_options:
@@ -827,68 +1462,67 @@ def render_smallcase(sc: dict):
     st.markdown("---")
 
     # ── Analytics ───────────────────────────────────────────────────────────
-    st.subheader("Analytics & Risk Metrics")
+    analytics_open = st.expander("Analytics & Risk Metrics", expanded=False)
+    with analytics_open:
+        # Fetch stock info for beta, div yield — cached, only runs when expanded
+        tickers = table["Ticker"].tolist()
+        weightages = table["Weightage %"].tolist()
 
-    # Fetch stock info for beta, div yield
-    tickers = table["Ticker"].tolist()
-    weightages = table["Weightage %"].tolist()
-
-    with st.spinner("Fetching stock fundamentals..."):
         infos = fin.fetch_stock_info_batch(tickers)
 
-    betas = [infos[t]["beta"] for t in tickers]
-    div_yields = [infos[t]["dividend_yield"] for t in tickers]
-    industries = [infos[t]["industry"] if infos[t]["industry"] else table.loc[table["Ticker"] == t, "Industry"].iloc[0] for t in tickers]
+        betas = [infos[t]["beta"] for t in tickers]
+        div_yields = [infos[t]["dividend_yield"] for t in tickers]
+        industries = [infos[t]["industry"] if infos[t]["industry"] else table.loc[table["Ticker"] == t, "Industry"].iloc[0] for t in tickers]
 
-    w_beta = fin.calculate_weighted_beta(betas, weightages)
-    w_div = fin.calculate_weighted_div_yield(div_yields, weightages)
-    sector_conc = fin.get_sector_concentration(industries, weightages)
+        w_beta = fin.calculate_weighted_beta(betas, weightages)
+        w_div = fin.calculate_weighted_div_yield(div_yields, weightages)
+        sector_conc = fin.get_sector_concentration(industries, weightages)
 
-    ac1, ac2, ac3 = st.columns(3)
-    with ac1:
-        metric_card("Weighted Avg Beta", f"{w_beta:.3f}" if w_beta else "N/A")
-    with ac2:
-        metric_card("Weighted Div Yield", f"{w_div:.2f}%")
-    with ac3:
-        vol = fin.calculate_portfolio_volatility(tickers, weightages)
-        metric_card("Portfolio Volatility (1Y)", f"{vol:.2f}%" if vol else "N/A")
+        ac1, ac2, ac3 = st.columns(3)
+        with ac1:
+            metric_card("Weighted Avg Beta", f"{w_beta:.3f}" if w_beta else "N/A")
+        with ac2:
+            metric_card("Weighted Div Yield", f"{w_div:.2f}%")
+        with ac3:
+            vol = fin.calculate_portfolio_volatility(tickers, weightages)
+            metric_card("Portfolio Volatility (1Y)", f"{vol:.2f}%" if vol else "N/A")
 
-    # Sector concentration
-    st.subheader("Sector Concentration")
-    col_sc1, col_sc2 = st.columns([2, 3])
+        # Sector concentration
+        st.subheader("Sector Concentration")
+        col_sc1, col_sc2 = st.columns([2, 3])
 
-    with col_sc1:
-        for sector, wt in sector_conc.items():
-            bar_color = "🔴" if wt > 30 else "🟢"
-            st.markdown(f"{bar_color} **{sector}**: {wt:.1f}%")
-            if wt > 30:
-                st.markdown(f'<div class="flag-warning">⚠️ Concentration Warning: {sector} is {wt:.1f}% (>30%)</div>',
-                            unsafe_allow_html=True)
+        with col_sc1:
+            for sector, wt in sector_conc.items():
+                bar_color = "🔴" if wt > 30 else "🟢"
+                st.markdown(f"{bar_color} **{sector}**: {wt:.1f}%")
+                if wt > 30:
+                    st.markdown(f'<div class="flag-warning">⚠️ Concentration Warning: {sector} is {wt:.1f}% (>30%)</div>',
+                                unsafe_allow_html=True)
 
-    with col_sc2:
-        if sector_conc:
-            fig = px.bar(
-                x=list(sector_conc.values()),
-                y=list(sector_conc.keys()),
-                orientation="h",
-                color=list(sector_conc.values()),
-                color_continuous_scale=["#26a69a", "#ffca28", "#ff5252"],
-                labels={"x": "Weightage %", "y": "Sector"},
-            )
-            fig.update_layout(
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
-                font_color="#e0e0e0",
-                height=300,
-                margin=dict(t=10, b=10),
-                showlegend=False,
-                coloraxis_showscale=False,
-                xaxis=dict(showgrid=True, gridcolor="#2d2d44"),
-                yaxis=dict(showgrid=False),
-            )
-            st.plotly_chart(fig, use_container_width=True)
+        with col_sc2:
+            if sector_conc:
+                fig = px.bar(
+                    x=list(sector_conc.values()),
+                    y=list(sector_conc.keys()),
+                    orientation="h",
+                    color=list(sector_conc.values()),
+                    color_continuous_scale=["#26a69a", "#ffca28", "#ff5252"],
+                    labels={"x": "Weightage %", "y": "Sector"},
+                )
+                fig.update_layout(
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    font_color="#e0e0e0",
+                    height=300,
+                    margin=dict(t=10, b=10),
+                    showlegend=False,
+                    coloraxis_showscale=False,
+                    xaxis=dict(showgrid=True, gridcolor="#2d2d44"),
+                    yaxis=dict(showgrid=False),
+                )
+                st.plotly_chart(fig, width="stretch")
 
-    # P/L Treemap
+    # P/L Heatmap — always visible outside expander
     st.subheader("P/L Heatmap")
     if not table.empty:
         tree_df = table[["Scrip Name", "Industry", "Market Value", "P/L %"]].copy()
@@ -907,7 +1541,7 @@ def render_smallcase(sc: dict):
             height=400,
             margin=dict(t=30, b=10, l=10, r=10),
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
     # Transaction log
     st.subheader("Transaction Log")
@@ -918,7 +1552,7 @@ def render_smallcase(sc: dict):
                 "transaction_date": "Date", "ticker": "Ticker", "action": "Action",
                 "units": "Units", "price": "Price",
             }),
-            use_container_width=True, hide_index=True,
+            width="stretch", hide_index=True,
         )
     else:
         st.info("No transactions recorded yet.")

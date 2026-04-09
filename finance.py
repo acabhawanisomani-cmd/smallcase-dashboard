@@ -6,6 +6,7 @@ import numpy as np
 from datetime import datetime, date, timedelta
 from functools import lru_cache
 import time
+import streamlit as st
 
 # Cache for live prices (refreshed per session)
 _price_cache: dict[str, dict] = {}
@@ -21,40 +22,109 @@ def _ensure_ns_suffix(ticker: str) -> str:
     return t
 
 
-def fetch_live_data(tickers: list[str]) -> dict[str, dict]:
-    """Fetch current price, previous close, day change, and % change for a list of tickers."""
-    global _price_cache, _cache_time
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_open_price(ticker: str, target_date: str) -> float | None:
+    """
+    Fetch the opening price of a stock on a specific date.
+    If the date is a holiday/weekend, fetches the next trading day's open.
+    Returns None if data can't be fetched.
+    """
+    ns = _ensure_ns_suffix(ticker)
+    try:
+        dt = datetime.strptime(target_date, "%Y-%m-%d").date()
+        # Fetch a few extra days to handle weekends/holidays
+        start = dt
+        end = dt + timedelta(days=7)
+        data = yf.download(ns, start=start.strftime("%Y-%m-%d"),
+                          end=end.strftime("%Y-%m-%d"),
+                          progress=False)
+        if data.empty:
+            return None
 
-    now = time.time()
-    # Return cache if fresh
-    missing = [t for t in tickers if t not in _price_cache] if (now - _cache_time < CACHE_TTL) else tickers
+        # Handle MultiIndex columns
+        if isinstance(data.columns, pd.MultiIndex):
+            data = data.droplevel("Ticker", axis=1)
 
-    if not missing:
-        return {t: _price_cache.get(t, _empty_quote()) for t in tickers}
+        # Get the first available trading day's open price (on or after target date)
+        if not data.empty:
+            return round(float(data["Open"].iloc[0]), 2)
+        return None
+    except Exception:
+        return None
 
-    ns_tickers = [_ensure_ns_suffix(t) for t in missing]
-    raw_to_orig = dict(zip(ns_tickers, missing))
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_open_prices_batch(tickers: list[str], target_date: str) -> dict[str, float | None]:
+    """Fetch opening prices for multiple tickers on a specific date."""
+    if not tickers:
+        return {}
+
+    ns_tickers = [_ensure_ns_suffix(t) for t in tickers]
+    ns_to_orig = dict(zip(ns_tickers, tickers))
 
     try:
-        data = yf.download(ns_tickers, period="2d", progress=False, threads=True)
+        dt = datetime.strptime(target_date, "%Y-%m-%d").date()
+        start = dt
+        end = dt + timedelta(days=7)
+        data = yf.download(ns_tickers, start=start.strftime("%Y-%m-%d"),
+                          end=end.strftime("%Y-%m-%d"),
+                          progress=False, threads=True)
+        if data.empty:
+            return {t: None for t in tickers}
+
+        results = {}
+        for ns_t, orig_t in ns_to_orig.items():
+            try:
+                if isinstance(data.columns, pd.MultiIndex):
+                    if len(ns_tickers) == 1:
+                        df = data.droplevel("Ticker", axis=1)
+                    else:
+                        df = data.xs(ns_t, level="Ticker", axis=1)
+                else:
+                    df = data
+
+                if not df.empty:
+                    results[orig_t] = round(float(df["Open"].iloc[0]), 2)
+                else:
+                    results[orig_t] = None
+            except Exception:
+                results[orig_t] = None
+
+        return results
     except Exception:
-        return {t: _price_cache.get(t, _empty_quote()) for t in tickers}
+        return {t: None for t in tickers}
+
+
+def fetch_live_data(tickers: list[str]) -> dict[str, dict]:
+    """Fetch current price, previous close, day change, and % change for a list of tickers."""
+    # Use Streamlit cache — converts list to tuple for hashability
+    return _fetch_live_data_cached(tuple(sorted(set(tickers))))
+
+
+@st.cache_data(ttl=300, show_spinner="Fetching live prices...")  # Cache 5 min
+def _fetch_live_data_cached(tickers: tuple) -> dict[str, dict]:
+    """Cached live price fetch — only calls yfinance every 5 minutes."""
+    result = {}
+    ns_tickers = [_ensure_ns_suffix(t) for t in tickers]
+    raw_to_orig = dict(zip(ns_tickers, tickers))
+
+    try:
+        data = yf.download(list(ns_tickers), period="2d", progress=False, threads=True)
+    except Exception:
+        return {t: _empty_quote() for t in tickers}
 
     for ns_t, orig_t in raw_to_orig.items():
         try:
-            # yf.download always returns MultiIndex columns: (Price, Ticker)
             if isinstance(data.columns, pd.MultiIndex):
                 if len(ns_tickers) == 1:
-                    # Columns are like ('Close', 'TICKER.NS') — droplevel to simplify
                     df = data.droplevel("Ticker", axis=1)
                 else:
-                    # Select this ticker's slice from the MultiIndex
                     df = data.xs(ns_t, level="Ticker", axis=1)
             else:
                 df = data
 
             if df.empty or len(df) < 1:
-                _price_cache[orig_t] = _empty_quote()
+                result[orig_t] = _empty_quote()
                 continue
 
             current = float(df["Close"].iloc[-1])
@@ -62,17 +132,16 @@ def fetch_live_data(tickers: list[str]) -> dict[str, dict]:
             change = current - prev
             pct = (change / prev * 100) if prev != 0 else 0.0
 
-            _price_cache[orig_t] = {
+            result[orig_t] = {
                 "current_price": round(current, 2),
                 "prev_close": round(prev, 2),
                 "today_change": round(change, 2),
                 "pct_change": round(pct, 2),
             }
         except Exception:
-            _price_cache[orig_t] = _empty_quote()
+            result[orig_t] = _empty_quote()
 
-    _cache_time = now
-    return {t: _price_cache.get(t, _empty_quote()) for t in tickers}
+    return result
 
 
 def _empty_quote() -> dict:
@@ -81,6 +150,12 @@ def _empty_quote() -> dict:
 
 def fetch_stock_info(ticker: str) -> dict:
     """Fetch beta, dividend yield, sector, industry for a ticker."""
+    return _fetch_stock_info_cached(ticker)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)  # Cache for 1 hour
+def _fetch_stock_info_cached(ticker: str) -> dict:
+    """Cached version - avoids repeated yfinance calls."""
     ns = _ensure_ns_suffix(ticker)
     try:
         info = yf.Ticker(ns).info
@@ -96,11 +171,49 @@ def fetch_stock_info(ticker: str) -> dict:
 
 
 def fetch_stock_info_batch(tickers: list[str]) -> dict[str, dict]:
-    """Fetch info for multiple tickers."""
+    """Fetch info for multiple tickers (each individually cached)."""
     results = {}
     for t in tickers:
-        results[t] = fetch_stock_info(t)
+        results[t] = _fetch_stock_info_cached(t)
     return results
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_opening_price(ticker: str, date_str: str) -> float | None:
+    """Fetch the opening price for a ticker on a specific date."""
+    ns = _ensure_ns_suffix(ticker)
+    try:
+        dt = datetime.strptime(date_str, "%Y-%m-%d").date()
+        # Fetch a few days around the target date to handle holidays
+        start = dt - timedelta(days=3)
+        end = dt + timedelta(days=3)
+        data = yf.download(ns, start=start.strftime("%Y-%m-%d"),
+                           end=end.strftime("%Y-%m-%d"), progress=False)
+        if data.empty:
+            return None
+        # Handle MultiIndex
+        if isinstance(data.columns, pd.MultiIndex):
+            data = data.droplevel("Ticker", axis=1)
+        # Find the exact date or the next available trading day
+        data.index = pd.to_datetime(data.index).date
+        if dt in data.index:
+            return round(float(data.loc[dt, "Open"]), 2)
+        # Find next trading day after target date
+        future = data[data.index >= dt]
+        if not future.empty:
+            return round(float(future.iloc[0]["Open"]), 2)
+        return None
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=3600, show_spinner="Fetching opening prices...")
+def fetch_opening_prices_batch(tickers: tuple, date_str: str) -> dict[str, float | None]:
+    """Fetch opening prices for multiple tickers on a specific date."""
+    result = {}
+    for t in tickers:
+        result[t] = fetch_opening_price(t, date_str)
+    return result
 
 
 def calculate_units(weightage: float, total_amount: float, buy_price: float) -> float:
@@ -186,6 +299,12 @@ def calculate_xirr(buy_date_str: str, buy_price: float, units: float,
 def calculate_portfolio_volatility(tickers: list[str], weightages: list[float],
                                    period: str = "1y") -> float | None:
     """Calculate portfolio standard deviation (annualized) from daily returns."""
+    # Convert to tuples for caching
+    return _calc_vol_cached(tuple(tickers), tuple(weightages), period)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)  # Cache for 1 hour
+def _calc_vol_cached(tickers: tuple, weightages: tuple, period: str) -> float | None:
     if not tickers:
         return None
 
@@ -196,22 +315,20 @@ def calculate_portfolio_volatility(tickers: list[str], weightages: list[float],
             return None
 
         closes = data["Close"]
-        # Handle MultiIndex columns from yf.download
         if isinstance(closes, pd.DataFrame) and isinstance(closes.columns, pd.MultiIndex):
             closes.columns = closes.columns.droplevel(0)
         if isinstance(closes, pd.Series):
             closes = closes.to_frame()
 
-        returns = closes.pct_change().dropna()
+        returns = closes.pct_change(fill_method=None).dropna()
         if returns.empty:
             return None
 
-        # Align weightages
-        weights = np.array(weightages[:len(returns.columns)]) / 100
+        weights = np.array(list(weightages)[:len(returns.columns)]) / 100
         if weights.sum() > 0:
             weights = weights / weights.sum()
 
-        cov_matrix = returns.cov() * 252  # Annualized
+        cov_matrix = returns.cov() * 252
         port_var = np.dot(weights.T, np.dot(cov_matrix, weights))
         return round(np.sqrt(port_var) * 100, 2)
     except Exception:

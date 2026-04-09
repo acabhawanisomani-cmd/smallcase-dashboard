@@ -1,18 +1,17 @@
-"""PostgreSQL database layer for Smallcase Dashboard (Supabase)."""
+"""SQLite database layer for Smallcase Dashboard."""
 
-import psycopg2
-import psycopg2.extras
+import sqlite3
 import pandas as pd
 from datetime import datetime, date
+import os
 
-import streamlit as st
-
-DATABASE_URL = st.secrets["DATABASE_URL"]
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "smallcase_data.db")
 
 
 def get_connection():
-    conn = psycopg2.connect(DATABASE_URL)
-    conn.autocommit = False
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 
@@ -22,46 +21,46 @@ def init_db():
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS smallcases (
-            id SERIAL PRIMARY KEY,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT UNIQUE NOT NULL,
             description TEXT DEFAULT '',
-            total_investable_amount DOUBLE PRECISION DEFAULT 0,
+            total_investable_amount REAL DEFAULT 0,
             is_design_mode INTEGER DEFAULT 0,
-            created_at TIMESTAMP DEFAULT NOW(),
-            updated_at TIMESTAMP DEFAULT NOW()
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            updated_at TEXT DEFAULT (datetime('now','localtime'))
         )
     """)
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS holdings (
-            id SERIAL PRIMARY KEY,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             smallcase_id INTEGER NOT NULL REFERENCES smallcases(id) ON DELETE CASCADE,
             ticker TEXT NOT NULL,
             scrip_name TEXT NOT NULL,
             industry TEXT DEFAULT '',
-            weightage DOUBLE PRECISION DEFAULT 0,
-            buy_price DOUBLE PRECISION DEFAULT 0,
+            weightage REAL DEFAULT 0,
+            buy_price REAL DEFAULT 0,
             buy_date TEXT,
             exit_date TEXT,
-            exit_price DOUBLE PRECISION DEFAULT 0,
-            units DOUBLE PRECISION DEFAULT 0,
+            exit_price REAL DEFAULT 0,
+            units REAL DEFAULT 0,
             is_active INTEGER DEFAULT 1,
-            created_at TIMESTAMP DEFAULT NOW(),
-            updated_at TIMESTAMP DEFAULT NOW()
+            created_at TEXT DEFAULT (datetime('now','localtime')),
+            updated_at TEXT DEFAULT (datetime('now','localtime'))
         )
     """)
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS transactions (
-            id SERIAL PRIMARY KEY,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             holding_id INTEGER NOT NULL REFERENCES holdings(id) ON DELETE CASCADE,
             smallcase_id INTEGER NOT NULL REFERENCES smallcases(id) ON DELETE CASCADE,
             ticker TEXT NOT NULL,
             action TEXT NOT NULL,
-            units DOUBLE PRECISION NOT NULL,
-            price DOUBLE PRECISION NOT NULL,
+            units REAL NOT NULL,
+            price REAL NOT NULL,
             transaction_date TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT NOW()
+            created_at TEXT DEFAULT (datetime('now','localtime'))
         )
     """)
 
@@ -77,10 +76,10 @@ def create_smallcase(name: str, description: str = "", total_amount: float = 0,
     cur = conn.cursor()
     cur.execute(
         "INSERT INTO smallcases (name, description, total_investable_amount, is_design_mode) "
-        "VALUES (%s, %s, %s, %s) RETURNING id",
+        "VALUES (?, ?, ?, ?)",
         (name, description, total_amount, int(is_design))
     )
-    sc_id = cur.fetchone()[0]
+    sc_id = cur.lastrowid
     conn.commit()
     conn.close()
     return sc_id
@@ -88,7 +87,7 @@ def create_smallcase(name: str, description: str = "", total_amount: float = 0,
 
 def get_all_smallcases() -> list[dict]:
     conn = get_connection()
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur = conn.cursor()
     cur.execute("SELECT * FROM smallcases ORDER BY created_at DESC")
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
@@ -97,8 +96,8 @@ def get_all_smallcases() -> list[dict]:
 
 def get_smallcase(sc_id: int) -> dict | None:
     conn = get_connection()
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT * FROM smallcases WHERE id = %s", (sc_id,))
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM smallcases WHERE id = ?", (sc_id,))
     row = cur.fetchone()
     conn.close()
     return dict(row) if row else None
@@ -106,10 +105,10 @@ def get_smallcase(sc_id: int) -> dict | None:
 
 def update_smallcase(sc_id: int, **kwargs):
     conn = get_connection()
-    sets = ", ".join(f"{k} = %s" for k in kwargs)
+    sets = ", ".join(f"{k} = ?" for k in kwargs)
     vals = list(kwargs.values()) + [sc_id]
     conn.cursor().execute(
-        f"UPDATE smallcases SET {sets}, updated_at = NOW() WHERE id = %s", vals
+        f"UPDATE smallcases SET {sets}, updated_at = datetime('now','localtime') WHERE id = ?", vals
     )
     conn.commit()
     conn.close()
@@ -117,7 +116,7 @@ def update_smallcase(sc_id: int, **kwargs):
 
 def delete_smallcase(sc_id: int):
     conn = get_connection()
-    conn.cursor().execute("DELETE FROM smallcases WHERE id = %s", (sc_id,))
+    conn.cursor().execute("DELETE FROM smallcases WHERE id = ?", (sc_id,))
     conn.commit()
     conn.close()
 
@@ -126,7 +125,8 @@ def deploy_smallcase(sc_id: int):
     """Convert a design-mode smallcase to live."""
     conn = get_connection()
     conn.cursor().execute(
-        "UPDATE smallcases SET is_design_mode = 0, updated_at = NOW() WHERE id = %s", (sc_id,)
+        "UPDATE smallcases SET is_design_mode = 0, updated_at = datetime('now','localtime') WHERE id = ?",
+        (sc_id,)
     )
     conn.commit()
     conn.close()
@@ -141,15 +141,15 @@ def add_holding(smallcase_id: int, ticker: str, scrip_name: str, industry: str,
     cur.execute("""
         INSERT INTO holdings (smallcase_id, ticker, scrip_name, industry, weightage,
                               buy_price, buy_date, units)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     """, (smallcase_id, ticker, scrip_name, industry, weightage, buy_price, buy_date, units))
-    h_id = cur.fetchone()[0]
+    h_id = cur.lastrowid
 
     # Record BUY transaction
     if buy_price > 0 and units > 0:
         cur.execute("""
             INSERT INTO transactions (holding_id, smallcase_id, ticker, action, units, price, transaction_date)
-            VALUES (%s, %s, %s, 'BUY', %s, %s, %s)
+            VALUES (?, ?, ?, 'BUY', ?, ?, ?)
         """, (h_id, smallcase_id, ticker, units, buy_price, buy_date))
 
     conn.commit()
@@ -159,7 +159,7 @@ def add_holding(smallcase_id: int, ticker: str, scrip_name: str, industry: str,
 
 def get_holdings(smallcase_id: int, active_only: bool = True) -> pd.DataFrame:
     conn = get_connection()
-    query = "SELECT * FROM holdings WHERE smallcase_id = %s"
+    query = "SELECT * FROM holdings WHERE smallcase_id = ?"
     if active_only:
         query += " AND is_active = 1"
     query += " ORDER BY weightage DESC"
@@ -170,10 +170,10 @@ def get_holdings(smallcase_id: int, active_only: bool = True) -> pd.DataFrame:
 
 def update_holding(holding_id: int, **kwargs):
     conn = get_connection()
-    sets = ", ".join(f"{k} = %s" for k in kwargs)
+    sets = ", ".join(f"{k} = ?" for k in kwargs)
     vals = list(kwargs.values()) + [holding_id]
     conn.cursor().execute(
-        f"UPDATE holdings SET {sets}, updated_at = NOW() WHERE id = %s", vals
+        f"UPDATE holdings SET {sets}, updated_at = datetime('now','localtime') WHERE id = ?", vals
     )
     conn.commit()
     conn.close()
@@ -181,7 +181,7 @@ def update_holding(holding_id: int, **kwargs):
 
 def delete_holding(holding_id: int):
     conn = get_connection()
-    conn.cursor().execute("DELETE FROM holdings WHERE id = %s", (holding_id,))
+    conn.cursor().execute("DELETE FROM holdings WHERE id = ?", (holding_id,))
     conn.commit()
     conn.close()
 
@@ -189,17 +189,17 @@ def delete_holding(holding_id: int):
 def exit_holding(holding_id: int, exit_price: float, exit_date: str):
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute("SELECT ticker, smallcase_id, units FROM holdings WHERE id = %s", (holding_id,))
+    cur.execute("SELECT ticker, smallcase_id, units FROM holdings WHERE id = ?", (holding_id,))
     row = cur.fetchone()
     if row:
-        ticker, sc_id, units = row
+        ticker, sc_id, units = row["ticker"], row["smallcase_id"], row["units"]
         cur.execute("""
-            UPDATE holdings SET exit_price = %s, exit_date = %s, is_active = 0,
-                                updated_at = NOW() WHERE id = %s
+            UPDATE holdings SET exit_price = ?, exit_date = ?, is_active = 0,
+                                updated_at = datetime('now','localtime') WHERE id = ?
         """, (exit_price, exit_date, holding_id))
         cur.execute("""
             INSERT INTO transactions (holding_id, smallcase_id, ticker, action, units, price, transaction_date)
-            VALUES (%s, %s, %s, 'SELL', %s, %s, %s)
+            VALUES (?, ?, ?, 'SELL', ?, ?, ?)
         """, (holding_id, sc_id, ticker, units, exit_price, exit_date))
     conn.commit()
     conn.close()
@@ -213,9 +213,9 @@ RESIDUAL_TICKER = "LIQUIDCASE"
 def get_residual_holding(smallcase_id: int) -> dict | None:
     """Get the LIQUIDCASE (residual/sweep) holding for a smallcase."""
     conn = get_connection()
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur = conn.cursor()
     cur.execute(
-        "SELECT * FROM holdings WHERE smallcase_id = %s AND ticker = %s AND is_active = 1",
+        "SELECT * FROM holdings WHERE smallcase_id = ? AND ticker = ? AND is_active = 1",
         (smallcase_id, RESIDUAL_TICKER),
     )
     row = cur.fetchone()
@@ -230,11 +230,11 @@ def rebalance_residual(smallcase_id: int, total_amount: float,
     Returns a summary dict of what changed, or None if no LIQUIDCASE exists.
     """
     conn = get_connection()
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur = conn.cursor()
 
     # Find the residual holding
     cur.execute(
-        "SELECT * FROM holdings WHERE smallcase_id = %s AND ticker = %s AND is_active = 1",
+        "SELECT * FROM holdings WHERE smallcase_id = ? AND ticker = ? AND is_active = 1",
         (smallcase_id, RESIDUAL_TICKER),
     )
     row = cur.fetchone()
@@ -246,11 +246,11 @@ def rebalance_residual(smallcase_id: int, total_amount: float,
 
     # Sum all OTHER active holdings' weightages
     cur.execute(
-        "SELECT COALESCE(SUM(weightage), 0) FROM holdings "
-        "WHERE smallcase_id = %s AND ticker != %s AND is_active = 1",
+        "SELECT COALESCE(SUM(weightage), 0) as total FROM holdings "
+        "WHERE smallcase_id = ? AND ticker != ? AND is_active = 1",
         (smallcase_id, RESIDUAL_TICKER),
     )
-    other_wt_sum = cur.fetchone()["coalesce"]
+    other_wt_sum = cur.fetchone()["total"]
 
     old_wt = residual["weightage"]
     old_units = residual["units"]
@@ -263,7 +263,7 @@ def rebalance_residual(smallcase_id: int, total_amount: float,
 
     # Update the residual holding
     cur.execute(
-        "UPDATE holdings SET weightage = %s, units = %s, updated_at = NOW() WHERE id = %s",
+        "UPDATE holdings SET weightage = ?, units = ?, updated_at = datetime('now','localtime') WHERE id = ?",
         (new_wt, new_units, residual["id"]),
     )
 
@@ -273,13 +273,13 @@ def rebalance_residual(smallcase_id: int, total_amount: float,
         sell_price = exit_price if exit_price and exit_price > 0 else buy_price
         cur.execute(
             "INSERT INTO transactions (holding_id, smallcase_id, ticker, action, units, price, transaction_date) "
-            "VALUES (%s, %s, %s, 'SELL', %s, %s, %s)",
+            "VALUES (?, ?, ?, 'SELL', ?, ?, ?)",
             (residual["id"], smallcase_id, RESIDUAL_TICKER, abs(delta_units), sell_price, today),
         )
     elif delta_units > 0:
         cur.execute(
             "INSERT INTO transactions (holding_id, smallcase_id, ticker, action, units, price, transaction_date) "
-            "VALUES (%s, %s, %s, 'BUY', %s, %s, %s)",
+            "VALUES (?, ?, ?, 'BUY', ?, ?, ?)",
             (residual["id"], smallcase_id, RESIDUAL_TICKER, delta_units, buy_price, today),
         )
 
@@ -298,7 +298,7 @@ def rebalance_residual(smallcase_id: int, total_amount: float,
 def get_transactions(smallcase_id: int) -> pd.DataFrame:
     conn = get_connection()
     df = pd.read_sql_query(
-        "SELECT * FROM transactions WHERE smallcase_id = %s ORDER BY transaction_date DESC",
+        "SELECT * FROM transactions WHERE smallcase_id = ? ORDER BY transaction_date DESC",
         conn, params=(smallcase_id,)
     )
     conn.close()
