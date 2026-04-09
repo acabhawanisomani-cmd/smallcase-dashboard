@@ -21,6 +21,44 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# ── Password Protection ────────────────────────────────────────────────────
+
+def check_password():
+    """Returns True if the user has entered the correct password."""
+
+    def password_entered():
+        """Check if entered password is correct."""
+        if st.session_state.get("password") == st.secrets.get("APP_PASSWORD", "Hare@Krishna108"):
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]  # Don't store password
+        else:
+            st.session_state["password_correct"] = False
+
+    if st.session_state.get("password_correct", False):
+        return True
+
+    # Show login screen
+    st.markdown("""
+    <div style="display: flex; justify-content: center; align-items: center; min-height: 60vh;">
+        <div style="text-align: center;">
+            <h1 style="font-size: 4rem;">🙏</h1>
+            <h2>Smallcase Dashboard</h2>
+            <p style="color: #888;">Enter password to continue</p>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    col1, col2, col3 = st.columns([1, 1, 1])
+    with col2:
+        st.text_input("Password", type="password", key="password", on_change=password_entered)
+        if "password_correct" in st.session_state and not st.session_state["password_correct"]:
+            st.error("❌ Incorrect password")
+    return False
+
+
+if not check_password():
+    st.stop()
+
 # ── Krishna-Themed Custom CSS ──────────────────────────────────────────────
 
 st.markdown("""
