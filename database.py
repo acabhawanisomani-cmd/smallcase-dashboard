@@ -26,7 +26,8 @@ DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "smallcase_da
 
 def get_connection():
     if _USE_PG:
-        conn = psycopg2.connect(_DATABASE_URL)
+        # connect_timeout=30 handles Neon cold starts (scales to zero when idle)
+        conn = psycopg2.connect(_DATABASE_URL, connect_timeout=30)
         conn.autocommit = False
         return conn
     else:
