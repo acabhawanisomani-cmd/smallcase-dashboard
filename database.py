@@ -27,16 +27,22 @@ DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "smallcase_da
 def get_connection():
     if _USE_PG:
         import time
-        # Retry with backoff for Neon cold starts (scales to zero when idle)
-        for attempt in range(3):
+        # Use pooled endpoint (-pooler) for reliable cross-region connections
+        db_url = _DATABASE_URL
+        # Auto-convert to pooled endpoint if not already
+        if "-pooler" not in db_url and ".neon.tech" in db_url:
+            db_url = db_url.replace(".neon.tech", "-pooler.neon.tech")
+
+        for attempt in range(5):
             try:
-                conn = psycopg2.connect(_DATABASE_URL, connect_timeout=60,
-                                        options="-c statement_timeout=30000")
+                conn = psycopg2.connect(db_url, connect_timeout=120,
+                                        keepalives=1, keepalives_idle=30,
+                                        keepalives_interval=10, keepalives_count=5)
                 conn.autocommit = False
                 return conn
             except Exception as e:
-                if attempt < 2:
-                    time.sleep(2 ** attempt)  # 1s, 2s
+                if attempt < 4:
+                    time.sleep(3 * (attempt + 1))  # 3s, 6s, 9s, 12s
                 else:
                     raise e
     else:
