@@ -421,16 +421,25 @@ def render_master_dashboard():
                     hole=0.45,
                     color_discrete_sequence=px.colors.qualitative.Set3,
                 )
+                fig.update_traces(textposition='inside', textinfo='percent',
+                                  hoverinfo='label+percent+value')
                 fig.update_layout(
                     paper_bgcolor="rgba(0,0,0,0)",
                     plot_bgcolor="rgba(0,0,0,0)",
                     font_color="#e0e0e0",
-                    height=350,
+                    height=450,
                     margin=dict(t=20, b=20, l=20, r=20),
                     showlegend=True,
-                    legend=dict(font=dict(size=10)),
+                    legend=dict(
+                        font=dict(size=9),
+                        orientation="h",
+                        yanchor="top",
+                        y=-0.1,
+                        xanchor="center",
+                        x=0.5,
+                    ),
                 )
-                st.plotly_chart(fig, width="stretch")
+                st.plotly_chart(fig, use_container_width=True)
 
     # Capital allocation bar chart
     if sc_summaries:
