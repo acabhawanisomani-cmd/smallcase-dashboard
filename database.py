@@ -26,10 +26,19 @@ DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "smallcase_da
 
 def get_connection():
     if _USE_PG:
-        # connect_timeout=30 handles Neon cold starts (scales to zero when idle)
-        conn = psycopg2.connect(_DATABASE_URL, connect_timeout=30)
-        conn.autocommit = False
-        return conn
+        import time
+        # Retry with backoff for Neon cold starts (scales to zero when idle)
+        for attempt in range(3):
+            try:
+                conn = psycopg2.connect(_DATABASE_URL, connect_timeout=60,
+                                        options="-c statement_timeout=30000")
+                conn.autocommit = False
+                return conn
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(2 ** attempt)  # 1s, 2s
+                else:
+                    raise e
     else:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
