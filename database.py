@@ -126,6 +126,7 @@ def init_db():
                 exit_price DOUBLE PRECISION DEFAULT 0,
                 units DOUBLE PRECISION DEFAULT 0,
                 is_active INTEGER DEFAULT 1,
+                stop_loss DOUBLE PRECISION DEFAULT 0,
                 created_at TIMESTAMP DEFAULT NOW(),
                 updated_at TIMESTAMP DEFAULT NOW()
             )
@@ -169,6 +170,7 @@ def init_db():
                 exit_price REAL DEFAULT 0,
                 units REAL DEFAULT 0,
                 is_active INTEGER DEFAULT 1,
+                stop_loss REAL DEFAULT 0,
                 created_at TEXT DEFAULT (datetime('now','localtime')),
                 updated_at TEXT DEFAULT (datetime('now','localtime'))
             )
@@ -186,6 +188,20 @@ def init_db():
                 created_at TEXT DEFAULT (datetime('now','localtime'))
             )
         """)
+
+    # ── Migrations: add columns that didn't exist in older schema ──
+    # stop_loss column — safe to run every time (ignored if column already exists)
+    try:
+        if _USE_PG:
+            cur.execute("ALTER TABLE holdings ADD COLUMN IF NOT EXISTS stop_loss DOUBLE PRECISION DEFAULT 0")
+        else:
+            # SQLite doesn't support IF NOT EXISTS on ALTER TABLE, so check manually
+            cur.execute("PRAGMA table_info(holdings)")
+            cols = [r[1] for r in cur.fetchall()]
+            if "stop_loss" not in cols:
+                cur.execute("ALTER TABLE holdings ADD COLUMN stop_loss REAL DEFAULT 0")
+    except Exception:
+        pass  # Column already exists — ignore
 
     conn.commit()
     conn.close()
@@ -266,23 +282,23 @@ def deploy_smallcase(sc_id: int):
 # ── Holdings CRUD ───────────────────────────────────────────────────────────
 
 def add_holding(smallcase_id: int, ticker: str, scrip_name: str, industry: str,
-                weightage: float, buy_price: float, buy_date: str, units: float) -> int:
+                weightage: float, buy_price: float, buy_date: str, units: float,
+                stop_loss: float = 0.0) -> int:
     conn = get_connection()
     cur = conn.cursor()
-    ph = _ph()
 
     if _USE_PG:
         cur.execute(f"""
             INSERT INTO holdings (smallcase_id, ticker, scrip_name, industry, weightage,
-                                  buy_price, buy_date, units)
-            VALUES ({_ph(8)}) RETURNING id
-        """, (smallcase_id, ticker, scrip_name, industry, weightage, buy_price, buy_date, units))
+                                  buy_price, buy_date, units, stop_loss)
+            VALUES ({_ph(9)}) RETURNING id
+        """, (smallcase_id, ticker, scrip_name, industry, weightage, buy_price, buy_date, units, stop_loss))
     else:
         cur.execute(f"""
             INSERT INTO holdings (smallcase_id, ticker, scrip_name, industry, weightage,
-                                  buy_price, buy_date, units)
-            VALUES ({_ph(8)})
-        """, (smallcase_id, ticker, scrip_name, industry, weightage, buy_price, buy_date, units))
+                                  buy_price, buy_date, units, stop_loss)
+            VALUES ({_ph(9)})
+        """, (smallcase_id, ticker, scrip_name, industry, weightage, buy_price, buy_date, units, stop_loss))
 
     h_id = _last_id(cur, "holdings")
 
@@ -446,7 +462,161 @@ def rebalance_residual(smallcase_id: int, total_amount: float,
     }
 
 
+# ── Realized P/L (from exited holdings) ────────────────────────────────────
+
+def get_realized_pnl(smallcase_id: int) -> dict:
+    """Return realized P/L stats for all exited holdings in a smallcase.
+
+    Realized P/L = SUM((exit_price - buy_price) * units) for is_active=0 holdings.
+    Excludes LIQUIDCASE sweep movements (they are rebalancing, not trading P/L).
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    ph = _ph()
+    cur.execute(
+        f"""
+        SELECT ticker, scrip_name, buy_price, exit_price, units, buy_date, exit_date
+        FROM holdings
+        WHERE smallcase_id = {ph}
+          AND is_active = 0
+          AND ticker != {ph}
+          AND exit_price IS NOT NULL
+        """,
+        (smallcase_id, RESIDUAL_TICKER),
+    )
+    rows = _fetchall_dict(cur)
+    conn.close()
+
+    total_realized = 0.0
+    total_cost = 0.0
+    total_proceeds = 0.0
+    details = []
+    for r in rows:
+        bp = float(r["buy_price"] or 0)
+        ep = float(r["exit_price"] or 0)
+        u = float(r["units"] or 0)
+        if u <= 0 or bp <= 0 or ep <= 0:
+            continue
+        cost = bp * u
+        proceeds = ep * u
+        pnl = proceeds - cost
+        total_cost += cost
+        total_proceeds += proceeds
+        total_realized += pnl
+        details.append({
+            "ticker": r["ticker"],
+            "scrip_name": r["scrip_name"],
+            "units": u,
+            "buy_price": bp,
+            "exit_price": ep,
+            "buy_date": r["buy_date"],
+            "exit_date": r["exit_date"],
+            "cost": cost,
+            "proceeds": proceeds,
+            "pnl": pnl,
+            "pnl_pct": (pnl / cost * 100) if cost > 0 else 0,
+        })
+
+    return {
+        "total_realized": round(total_realized, 2),
+        "total_cost": round(total_cost, 2),
+        "total_proceeds": round(total_proceeds, 2),
+        "details": details,
+    }
+
+
+# ── Closed Position Edit / Reopen ──────────────────────────────────────────
+
+def update_closed_position(holding_id: int, exit_price: float, exit_date: str):
+    """Update the exit_price/exit_date of a closed (is_active=0) holding,
+    AND update its corresponding SELL transaction to match."""
+    conn = get_connection()
+    cur = conn.cursor()
+    ph = _ph()
+
+    # Update the holding
+    cur.execute(
+        f"UPDATE holdings SET exit_price = {ph}, exit_date = {ph}, "
+        f"updated_at = {_now_expr()} WHERE id = {ph}",
+        (exit_price, exit_date, holding_id),
+    )
+
+    # Update the most recent SELL transaction for this holding
+    cur.execute(
+        f"SELECT id FROM transactions WHERE holding_id = {ph} AND action = 'SELL' "
+        f"ORDER BY id DESC LIMIT 1",
+        (holding_id,),
+    )
+    row = cur.fetchone()
+    if row:
+        txn_id = row[0]
+        cur.execute(
+            f"UPDATE transactions SET price = {ph}, transaction_date = {ph} WHERE id = {ph}",
+            (exit_price, exit_date, txn_id),
+        )
+
+    conn.commit()
+    conn.close()
+
+
+def reopen_closed_position(holding_id: int):
+    """Mark a closed holding as active again (clears exit_price/exit_date).
+    Also deletes the associated SELL transaction."""
+    conn = get_connection()
+    cur = conn.cursor()
+    ph = _ph()
+
+    # Delete the SELL transaction(s) for this holding
+    cur.execute(
+        f"DELETE FROM transactions WHERE holding_id = {ph} AND action = 'SELL'",
+        (holding_id,),
+    )
+
+    # Reactivate the holding
+    if _USE_PG:
+        cur.execute(
+            f"UPDATE holdings SET is_active = 1, exit_price = 0, exit_date = NULL, "
+            f"updated_at = {_now_expr()} WHERE id = {ph}",
+            (holding_id,),
+        )
+    else:
+        cur.execute(
+            f"UPDATE holdings SET is_active = 1, exit_price = 0, exit_date = NULL, "
+            f"updated_at = {_now_expr()} WHERE id = {ph}",
+            (holding_id,),
+        )
+
+    conn.commit()
+    conn.close()
+
+
 # ── Transactions ────────────────────────────────────────────────────────────
+
+def delete_transaction(transaction_id: int):
+    """Delete a single transaction by ID. Holdings table is NOT auto-adjusted —
+    use this only for stray/bogus transactions."""
+    conn = get_connection()
+    conn.cursor().execute(
+        f"DELETE FROM transactions WHERE id = {_ph()}", (transaction_id,)
+    )
+    conn.commit()
+    conn.close()
+
+
+def update_transaction(transaction_id: int, **kwargs):
+    """Update fields of a transaction (price, units, transaction_date, action)."""
+    if not kwargs:
+        return
+    conn = get_connection()
+    ph = _ph()
+    sets = ", ".join(f"{k} = {ph}" for k in kwargs)
+    vals = list(kwargs.values()) + [transaction_id]
+    conn.cursor().execute(
+        f"UPDATE transactions SET {sets} WHERE id = {ph}", vals
+    )
+    conn.commit()
+    conn.close()
+
 
 def get_transactions(smallcase_id: int) -> pd.DataFrame:
     conn = get_connection()

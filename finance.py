@@ -26,31 +26,36 @@ def _ensure_ns_suffix(ticker: str) -> str:
 def fetch_open_price(ticker: str, target_date: str) -> float | None:
     """
     Fetch the opening price of a stock on a specific date.
+    Tries NSE first, falls back to BSE for SME / BSE-only stocks.
     If the date is a holiday/weekend, fetches the next trading day's open.
     Returns None if data can't be fetched.
     """
-    ns = _ensure_ns_suffix(ticker)
+    base = ticker.strip().upper().replace(".NS", "").replace(".BO", "")
     try:
         dt = datetime.strptime(target_date, "%Y-%m-%d").date()
-        # Fetch a few extra days to handle weekends/holidays
-        start = dt
-        end = dt + timedelta(days=7)
-        data = yf.download(ns, start=start.strftime("%Y-%m-%d"),
-                          end=end.strftime("%Y-%m-%d"),
-                          progress=False)
-        if data.empty:
-            return None
-
-        # Handle MultiIndex columns
-        if isinstance(data.columns, pd.MultiIndex):
-            data = data.droplevel("Ticker", axis=1)
-
-        # Get the first available trading day's open price (on or after target date)
-        if not data.empty:
-            return round(float(data["Open"].iloc[0]), 2)
-        return None
     except Exception:
         return None
+    start = dt
+    end = dt + timedelta(days=7)
+
+    for suffix in (".NS", ".BO"):
+        try:
+            data = yf.download(base + suffix, start=start.strftime("%Y-%m-%d"),
+                               end=end.strftime("%Y-%m-%d"),
+                               progress=False, auto_adjust=False)
+            if data.empty:
+                continue
+            if isinstance(data.columns, pd.MultiIndex):
+                data = data.droplevel("Ticker", axis=1)
+            data = data.dropna(subset=["Open"]) if "Open" in data.columns else data
+            if data.empty:
+                continue
+            val = float(data["Open"].iloc[0])
+            if val > 0 and not pd.isna(val):
+                return round(val, 2)
+        except Exception:
+            continue
+    return None
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -101,45 +106,88 @@ def fetch_live_data(tickers: list[str]) -> dict[str, dict]:
     return _fetch_live_data_cached(tuple(sorted(set(tickers))))
 
 
+def _quote_from_df(df) -> dict | None:
+    """Build a quote dict from a 2-day OHLC DataFrame. Returns None if empty/invalid."""
+    if df is None or df.empty or len(df) < 1:
+        return None
+    try:
+        current = float(df["Close"].iloc[-1])
+        if current <= 0 or pd.isna(current):
+            return None
+        prev = float(df["Close"].iloc[-2]) if len(df) >= 2 else current
+        change = current - prev
+        pct = (change / prev * 100) if prev != 0 else 0.0
+        return {
+            "current_price": round(current, 2),
+            "prev_close": round(prev, 2),
+            "today_change": round(change, 2),
+            "pct_change": round(pct, 2),
+        }
+    except Exception:
+        return None
+
+
+def _fetch_single_quote_with_fallback(ticker: str) -> dict:
+    """Try .NS first, then .BO (BSE) as fallback for SME / BSE-only stocks."""
+    base = ticker.strip().upper().replace(".NS", "").replace(".BO", "")
+    for suffix in (".NS", ".BO"):
+        try:
+            data = yf.download(base + suffix, period="5d",
+                               progress=False, auto_adjust=False)
+            if isinstance(data.columns, pd.MultiIndex):
+                data = data.droplevel("Ticker", axis=1)
+            q = _quote_from_df(data)
+            if q:
+                return q
+        except Exception:
+            continue
+    return _empty_quote()
+
+
 @st.cache_data(ttl=300, show_spinner="Fetching live prices...")  # Cache 5 min
 def _fetch_live_data_cached(tickers: tuple) -> dict[str, dict]:
-    """Cached live price fetch — only calls yfinance every 5 minutes."""
+    """Cached live price fetch — only calls yfinance every 5 minutes.
+
+    Strategy: bulk-download all .NS tickers in one call, then individually
+    retry failed ones with .BO (BSE) suffix as fallback for SME/BSE-only stocks.
+    """
     result = {}
     ns_tickers = [_ensure_ns_suffix(t) for t in tickers]
     raw_to_orig = dict(zip(ns_tickers, tickers))
 
     try:
-        data = yf.download(list(ns_tickers), period="2d", progress=False, threads=True)
+        data = yf.download(list(ns_tickers), period="5d", progress=False,
+                           threads=True, auto_adjust=False)
     except Exception:
-        return {t: _empty_quote() for t in tickers}
+        data = None
 
-    for ns_t, orig_t in raw_to_orig.items():
-        try:
-            if isinstance(data.columns, pd.MultiIndex):
-                if len(ns_tickers) == 1:
-                    df = data.droplevel("Ticker", axis=1)
+    failed = []
+    if data is not None and not data.empty:
+        for ns_t, orig_t in raw_to_orig.items():
+            try:
+                if isinstance(data.columns, pd.MultiIndex):
+                    if len(ns_tickers) == 1:
+                        df = data.droplevel("Ticker", axis=1)
+                    else:
+                        df = data.xs(ns_t, level="Ticker", axis=1)
                 else:
-                    df = data.xs(ns_t, level="Ticker", axis=1)
-            else:
-                df = data
+                    df = data
 
-            if df.empty or len(df) < 1:
-                result[orig_t] = _empty_quote()
-                continue
+                # Drop rows where close is NaN (these tickers had no data)
+                df = df.dropna(subset=["Close"]) if "Close" in df.columns else df
+                q = _quote_from_df(df)
+                if q:
+                    result[orig_t] = q
+                else:
+                    failed.append(orig_t)
+            except Exception:
+                failed.append(orig_t)
+    else:
+        failed = list(tickers)
 
-            current = float(df["Close"].iloc[-1])
-            prev = float(df["Close"].iloc[-2]) if len(df) >= 2 else current
-            change = current - prev
-            pct = (change / prev * 100) if prev != 0 else 0.0
-
-            result[orig_t] = {
-                "current_price": round(current, 2),
-                "prev_close": round(prev, 2),
-                "today_change": round(change, 2),
-                "pct_change": round(pct, 2),
-            }
-        except Exception:
-            result[orig_t] = _empty_quote()
+    # Retry failed tickers with .BO fallback
+    for orig_t in failed:
+        result[orig_t] = _fetch_single_quote_with_fallback(orig_t)
 
     return result
 

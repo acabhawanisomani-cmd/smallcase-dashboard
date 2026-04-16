@@ -293,6 +293,9 @@ def build_holdings_table(holdings_df: pd.DataFrame, total_amount: float,
         days = fin.calculate_days_held(h["buy_date"]) if not is_design else 0
         xirr = fin.calculate_xirr(h["buy_date"], buy_price, units, current_price) if not is_design else None
 
+        sl = float(h["stop_loss"]) if h.get("stop_loss") and float(h["stop_loss"]) > 0 else 0.0
+        sl_triggered = sl > 0 and current_price <= sl
+
         rows.append({
             "ID": h["id"],
             "Scrip Name": h["scrip_name"],
@@ -311,6 +314,9 @@ def build_holdings_table(holdings_df: pd.DataFrame, total_amount: float,
             "XIRR %": xirr if xirr is not None else "",
             "Today Chg": ld["today_change"],
             "% Chg": ld["pct_change"],
+            "Stop Loss": sl if sl > 0 else "",
+            "🚨 SL Hit": "🚨 SL HIT" if sl_triggered else "",
+            "_sl_triggered": sl_triggered,   # internal flag for row highlight
             "Exit Date": h["exit_date"] if h["exit_date"] else "",
             "Exit Price": h["exit_price"] if h["exit_price"] else "",
         })
@@ -380,55 +386,74 @@ def render_master_dashboard():
     # Aggregate data across all live (non-design) smallcases
     total_invested = 0
     total_market_val = 0
-    total_pnl = 0
+    total_unrealized = 0
+    total_realized = 0
     sector_data = {}
     sc_summaries = []
 
     for sc in all_sc:
         if sc["is_design_mode"]:
             continue
+        # Realized P/L from exited holdings (even if the smallcase is now empty)
+        realized = db.get_realized_pnl(sc["id"])["total_realized"]
+
         holdings = db.get_holdings(sc["id"])
-        if holdings.empty:
+        if holdings.empty and realized == 0:
             continue
 
-        table = build_holdings_table(holdings, sc["total_investable_amount"])
-        if table.empty:
-            continue
+        if not holdings.empty:
+            table = build_holdings_table(holdings, sc["total_investable_amount"])
+        else:
+            table = pd.DataFrame()
 
-        inv = table["Invested Amount"].sum()
-        mv = table["Market Value"].sum()
-        pl = table["P/L"].sum()
+        if not table.empty:
+            inv = table["Invested Amount"].sum()
+            mv = table["Market Value"].sum()
+            pl = table["P/L"].sum()
+        else:
+            inv = mv = pl = 0
+
         total_invested += inv
         total_market_val += mv
-        total_pnl += pl
+        total_unrealized += pl
+        total_realized += realized
 
         # Sector aggregation
-        for _, row in table.iterrows():
-            ind = row["Industry"] if row["Industry"] else "Unknown"
-            sector_data[ind] = sector_data.get(ind, 0) + row["Market Value"]
+        if not table.empty:
+            for _, row in table.iterrows():
+                ind = row["Industry"] if row["Industry"] else "Unknown"
+                sector_data[ind] = sector_data.get(ind, 0) + row["Market Value"]
 
+        combined_pl = pl + realized
         sc_summaries.append({
             "Smallcase": sc["name"],
             "Invested": inv,
             "Market Value": mv,
-            "P/L": pl,
-            "P/L %": round(pl / inv * 100, 2) if inv > 0 else 0,
-            "Stocks": len(table),
+            "Unrealized P/L": pl,
+            "Realized P/L": realized,
+            "Total P/L": combined_pl,
+            "Total P/L %": round(combined_pl / inv * 100, 2) if inv > 0 else 0,
+            "Stocks": len(table) if not table.empty else 0,
         })
 
     # Top metric cards
+    total_pnl = total_unrealized + total_realized
     pnl_pct = round(total_pnl / total_invested * 100, 2) if total_invested > 0 else 0
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
         metric_card("Total Invested", format_inr(total_invested))
     with col2:
         metric_card("Current Value", format_inr(total_market_val),
                      "profit" if total_market_val >= total_invested else "loss")
     with col3:
+        metric_card("Unrealized P/L", format_inr(total_unrealized),
+                     "profit" if total_unrealized >= 0 else "loss")
+    with col4:
+        metric_card("Realized P/L", format_inr(total_realized),
+                     "profit" if total_realized >= 0 else "loss")
+    with col5:
         metric_card("Total P/L", f"{format_inr(total_pnl)} ({pnl_pct}%)",
                      "profit" if total_pnl >= 0 else "loss")
-    with col4:
-        metric_card("Active Smallcases", str(len(sc_summaries)))
 
     st.markdown("---")
 
@@ -440,12 +465,16 @@ def render_master_dashboard():
             st.subheader("Smallcase Performance")
             sum_df = pd.DataFrame(sc_summaries)
             st.dataframe(
-                sum_df.style.map(color_pnl, subset=["P/L", "P/L %"])
+                sum_df.style.map(color_pnl,
+                                 subset=["Unrealized P/L", "Realized P/L",
+                                         "Total P/L", "Total P/L %"])
                      .format({
                          "Invested": "₹{:,.0f}",
                          "Market Value": "₹{:,.0f}",
-                         "P/L": "₹{:,.0f}",
-                         "P/L %": "{:.2f}%",
+                         "Unrealized P/L": "₹{:,.0f}",
+                         "Realized P/L": "₹{:,.0f}",
+                         "Total P/L": "₹{:,.0f}",
+                         "Total P/L %": "{:.2f}%",
                      }),
                 width="stretch", hide_index=True,
             )
@@ -639,13 +668,21 @@ def render_smallcase(sc: dict):
                 if not auto_calc:
                     manual_units = st.number_input("Manual Units", 0.0, step=1.0)
 
-            liq_exit_price = st.number_input(
-                "LIQUIDCASE exit price (₹) — auto-fetched",
-                min_value=0.0, step=0.1,
-                value=float(add_liq_fetched),
-                key=f"add_liq_ep_{sc_id}",
-                help="Auto-filled with LIQUIDCASE opening price on same date. Override if needed."
-            )
+            sl_col1, sl_col2 = st.columns(2)
+            with sl_col1:
+                stop_loss_add = st.number_input(
+                    "Stop Loss (₹) — optional",
+                    min_value=0.0, step=0.5, value=0.0,
+                    help="Row turns red on the dashboard if current price falls to or below this level. Leave 0 to skip."
+                )
+            with sl_col2:
+                liq_exit_price = st.number_input(
+                    "LIQUIDCASE exit price (₹) — auto-fetched",
+                    min_value=0.0, step=0.1,
+                    value=float(add_liq_fetched),
+                    key=f"add_liq_ep_{sc_id}",
+                    help="Auto-filled with LIQUIDCASE opening price on same date. Override if needed."
+                )
 
             add_submitted = st.form_submit_button("Add Stock")
             if add_submitted and ticker_input:
@@ -665,6 +702,7 @@ def render_smallcase(sc: dict):
                     buy_price=buy_price,
                     buy_date=add_date_str,
                     units=units,
+                    stop_loss=stop_loss_add,
                 )
 
                 # Auto-rebalance LIQUIDCASE
@@ -1076,22 +1114,33 @@ def render_smallcase(sc: dict):
     # Summary metrics
     total_inv = table["Invested Amount"].sum()
     total_mv = table["Market Value"].sum()
-    total_pl = table["P/L"].sum()
+    unrealized_pl = table["P/L"].sum()
+    realized_info = db.get_realized_pnl(sc_id)
+    realized_pl = realized_info["total_realized"]
+    total_pl = unrealized_pl + realized_pl
     total_pl_pct = round(total_pl / total_inv * 100, 2) if total_inv > 0 else 0
     total_wt = table["Weightage %"].sum()
 
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
         metric_card("Invested", format_inr(total_inv))
     with c2:
         metric_card("Market Value", format_inr(total_mv),
                      "profit" if total_mv >= total_inv else "loss")
     with c3:
-        metric_card("P/L", f"{format_inr(total_pl)} ({total_pl_pct}%)",
-                     "profit" if total_pl >= 0 else "loss")
+        metric_card("Unrealized P/L", format_inr(unrealized_pl),
+                     "profit" if unrealized_pl >= 0 else "loss")
     with c4:
-        metric_card("Stocks", str(len(table)))
+        metric_card("Realized P/L", format_inr(realized_pl),
+                     "profit" if realized_pl >= 0 else "loss")
+
+    c5, c6, c7 = st.columns(3)
     with c5:
+        metric_card("Total P/L", f"{format_inr(total_pl)} ({total_pl_pct}%)",
+                     "profit" if total_pl >= 0 else "loss")
+    with c6:
+        metric_card("Stocks", str(len(table)))
+    with c7:
         wt_class = "profit" if abs(total_wt - 100) < 1 else "loss"
         metric_card("Total Weightage", f"{total_wt:.1f}%", wt_class)
 
@@ -1100,27 +1149,75 @@ def render_smallcase(sc: dict):
     # Main holdings table
     st.subheader("Holdings")
     display_cols = ["Scrip Name", "Ticker", "Weightage %", "Units",
-                    "Buy Price", "Current Price", "Invested Amount",
-                    "Market Value", "P/L", "P/L %", "Days Held", "XIRR %",
-                    "Today Chg", "% Chg", "Buy Date", "Industry"]
+                    "Buy Date", "Buy Price", "Current Price",
+                    "Invested Amount", "Market Value", "P/L", "P/L %",
+                    "Days Held", "XIRR %", "Today Chg", "% Chg", "Industry"]
     display_df = table[display_cols].copy()
+
+    # Build a TradingView URL with the scrip name embedded as a URL fragment.
+    # Streamlit's LinkColumn uses a regex on the URL to render display text.
+    def _stock_link(row) -> str:
+        clean = str(row["Ticker"]).replace(".NS", "").replace(".BO", "")
+        # LIQUIDCASE has no equity chart — point to its parent ETF page
+        if clean == db.RESIDUAL_TICKER:
+            return f"https://www.tradingview.com/symbols/NSE-LIQUIDBEES/#~{row['Scrip Name']}"
+        return f"https://www.tradingview.com/chart/?symbol=NSE%3A{clean}#~{row['Scrip Name']}"
+
+    display_df["Stock"] = display_df.apply(_stock_link, axis=1)
+
+    # Reorder so Stock (clickable scrip name) is first; drop the now-redundant
+    # plain Scrip Name and Ticker columns.
+    # Carry the stop-loss trigger flag before we drop internal columns
+    sl_flags = display_df["_sl_triggered"].tolist() if "_sl_triggered" in display_df.columns else []
+
+    final_cols = ["Stock", "Weightage %", "Units", "Buy Date", "Buy Price",
+                  "Current Price", "Stop Loss", "🚨 SL Hit",
+                  "Invested Amount", "Market Value", "P/L",
+                  "P/L %", "Days Held", "XIRR %", "Today Chg", "% Chg", "Industry"]
+    # Only include Stop Loss / SL Hit if any stock has a stop loss set
+    has_sl = table["Stop Loss"].apply(lambda x: x != "").any() if "Stop Loss" in table.columns else False
+    if not has_sl:
+        final_cols = [c for c in final_cols if c not in ("Stop Loss", "🚨 SL Hit")]
+
+    display_df = display_df[[c for c in final_cols if c in display_df.columns]]
+
+    def _highlight_sl(row):
+        """Turn entire row red if stop loss is triggered."""
+        idx = row.name
+        if idx < len(sl_flags) and sl_flags[idx]:
+            return ["background-color: rgba(255,50,50,0.25); color: #ff8080"] * len(row)
+        return [""] * len(row)
+
+    fmt = {
+        "Weightage %": "{:.1f}%",
+        "Units": "{:.2f}",
+        "Buy Price": "₹{:,.2f}",
+        "Current Price": "₹{:,.2f}",
+        "Invested Amount": "₹{:,.0f}",
+        "Market Value": "₹{:,.0f}",
+        "P/L": "₹{:,.0f}",
+        "P/L %": "{:.2f}%",
+        "Today Chg": "₹{:,.2f}",
+        "% Chg": "{:.2f}%",
+    }
+    if has_sl:
+        fmt["Stop Loss"] = lambda x: f"₹{x:,.2f}" if isinstance(x, (int, float)) and x > 0 else ""
 
     st.dataframe(
         display_df.style
+            .apply(_highlight_sl, axis=1)
             .map(color_pnl, subset=["P/L", "P/L %", "Today Chg", "% Chg"])
-            .format({
-                "Weightage %": "{:.1f}%",
-                "Units": "{:.2f}",
-                "Buy Price": "₹{:,.2f}",
-                "Current Price": "₹{:,.2f}",
-                "Invested Amount": "₹{:,.0f}",
-                "Market Value": "₹{:,.0f}",
-                "P/L": "₹{:,.0f}",
-                "P/L %": "{:.2f}%",
-                "Today Chg": "₹{:,.2f}",
-                "% Chg": "{:.2f}%",
-            }),
-        width="stretch", hide_index=True, height=min(400, 50 + 35 * len(display_df)),
+            .format(fmt),
+        width="stretch", hide_index=True,
+        height=min(400, 50 + 35 * len(display_df)),
+        column_config={
+            "Stock": st.column_config.LinkColumn(
+                "Stock 📈",
+                help="Click the stock name to open its chart on TradingView",
+                display_text=r"#~(.+)$",
+                width="medium",
+            ),
+        },
     )
 
     # ── Edit / Delete / Exit Actions ────────────────────────────────────────
@@ -1134,12 +1231,16 @@ def render_smallcase(sc: dict):
     # Helper to show current stock summary
     def _stock_summary(h_id):
         row = table[table["ID"] == h_id].iloc[0]
+        # Get stop_loss from the raw holdings df (not display table)
+        raw_row = holdings[holdings["id"] == h_id]
+        sl = float(raw_row["stop_loss"].iloc[0]) if not raw_row.empty and "stop_loss" in raw_row.columns else 0.0
         return row, {
             "wt": float(row["Weightage %"]),
             "bp": float(row["Buy Price"]),
             "ind": str(row["Industry"]),
             "units": float(row["Units"]),
             "inv": float(row["Invested Amount"]),
+            "sl": sl,
         }
 
     with tab_edit:
@@ -1162,6 +1263,10 @@ def render_smallcase(sc: dict):
                                              key=f"ewt_{sc_id}_{h_id}")
                     new_bp = st.number_input("Buy Price (₹)", 0.0, value=cur["bp"], step=0.5,
                                              key=f"ebp_{sc_id}_{h_id}")
+                    new_sl = st.number_input("Stop Loss (₹) — 0 to remove",
+                                             min_value=0.0, value=cur["sl"], step=0.5,
+                                             key=f"esl_{sc_id}_{h_id}",
+                                             help="Row turns red when current price ≤ this value. Set 0 to disable.")
                 with ec2:
                     new_ind = st.text_input("Industry", value=cur["ind"], key=f"eind_{sc_id}_{h_id}")
                     new_units = st.number_input("Units", 0.0, value=cur["units"], step=1.0,
@@ -1189,6 +1294,8 @@ def render_smallcase(sc: dict):
                         updates["buy_price"] = new_bp
                     if new_ind != cur["ind"]:
                         updates["industry"] = new_ind
+                    if new_sl != cur["sl"]:
+                        updates["stop_loss"] = new_sl
 
                     if recalc_units:
                         bp = new_bp if new_bp > 0 else cur["bp"]
@@ -1259,7 +1366,7 @@ def render_smallcase(sc: dict):
                     add_bp = st.number_input(
                         "Buy Price for new tranche (₹)", 0.0, step=0.5,
                         value=float(fetched_avg_price),
-                        key=f"abp_{sc_id}_{h_id_avg}",
+                        key=f"abp_{sc_id}_{h_id_avg}_{avg_date_str}",
                         help="Auto-filled with opening price. Override if needed."
                     )
 
@@ -1289,7 +1396,7 @@ def render_smallcase(sc: dict):
                         "LIQUIDCASE exit price (₹) — auto-fetched",
                         min_value=0.0, step=0.1,
                         value=float(liq_price_avg),
-                        key=f"aliq_{sc_id}_{h_id_avg}",
+                        key=f"aliq_{sc_id}_{h_id_avg}_{avg_date_str}",
                         help="Auto-filled with LIQUIDCASE opening price on same date. Override if needed."
                     )
 
@@ -1387,7 +1494,7 @@ def render_smallcase(sc: dict):
                         red_exit_price = st.number_input(
                             "Exit Price for sold units (₹)", 0.0, step=0.5,
                             value=float(fetched_red_price),
-                            key=f"rep_{sc_id}_{h_id_red}",
+                            key=f"rep_{sc_id}_{h_id_red}_{red_date_str}",
                             help="Auto-filled with opening price. Override if needed."
                         )
 
@@ -1469,10 +1576,10 @@ def render_smallcase(sc: dict):
             else:
                 st.warning(f"Could not fetch price for {exit_ticker} on {exit_date_str}. Enter manually below.")
 
-            with st.form(f"exit_form_{sc_id}"):
+            with st.form(f"exit_form_{sc_id}_{exit_date_str}"):
                 exit_price = st.number_input("Exit Price (₹)", 0.0,
                                               value=float(fetched_exit_price),
-                                              key=f"exp_{sc_id}",
+                                              key=f"exp_{sc_id}_{h_id_exit}_{exit_date_str}",
                                               help="Auto-filled with opening price. Override if needed.")
                 if st.form_submit_button("Exit Position"):
                     if exit_price <= 0:
@@ -1589,6 +1696,40 @@ def render_smallcase(sc: dict):
             margin=dict(t=30, b=10, l=10, r=10),
         )
         st.plotly_chart(fig, width="stretch")
+
+    # Realized P/L — closed positions
+    if realized_info["details"]:
+        st.subheader("Realized P/L · Closed Positions")
+        rp_rows = []
+        for d in realized_info["details"]:
+            rp_rows.append({
+                "Scrip Name": d["scrip_name"],
+                "Ticker": d["ticker"],
+                "Units": round(d["units"], 2),
+                "Buy Date": d["buy_date"] or "",
+                "Buy Price": d["buy_price"],
+                "Exit Date": d["exit_date"] or "",
+                "Exit Price": d["exit_price"],
+                "Cost": d["cost"],
+                "Proceeds": d["proceeds"],
+                "Realized P/L": d["pnl"],
+                "P/L %": round(d["pnl_pct"], 2),
+            })
+        rp_df = pd.DataFrame(rp_rows)
+        st.dataframe(
+            rp_df.style
+                .map(color_pnl, subset=["Realized P/L", "P/L %"])
+                .format({
+                    "Units": "{:.2f}",
+                    "Buy Price": "₹{:,.2f}",
+                    "Exit Price": "₹{:,.2f}",
+                    "Cost": "₹{:,.0f}",
+                    "Proceeds": "₹{:,.0f}",
+                    "Realized P/L": "₹{:,.0f}",
+                    "P/L %": "{:.2f}%",
+                }),
+            width="stretch", hide_index=True,
+        )
 
     # Transaction log
     st.subheader("Transaction Log")
