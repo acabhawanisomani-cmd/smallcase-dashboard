@@ -1154,28 +1154,30 @@ def render_smallcase(sc: dict):
                     "Days Held", "XIRR %", "Today Chg", "% Chg", "Industry"]
     display_df = table[display_cols].copy()
 
+    # Copy stop-loss columns from table into display_df
+    display_df["Stop Loss"] = table["Stop Loss"].values
+    display_df["🚨 SL Hit"] = table["🚨 SL Hit"].values
+    display_df["_sl_triggered"] = table["_sl_triggered"].values
+
     # Build a TradingView URL with the scrip name embedded as a URL fragment.
-    # Streamlit's LinkColumn uses a regex on the URL to render display text.
     def _stock_link(row) -> str:
         clean = str(row["Ticker"]).replace(".NS", "").replace(".BO", "")
-        # LIQUIDCASE has no equity chart — point to its parent ETF page
         if clean == db.RESIDUAL_TICKER:
             return f"https://www.tradingview.com/symbols/NSE-LIQUIDBEES/#~{row['Scrip Name']}"
         return f"https://www.tradingview.com/chart/?symbol=NSE%3A{clean}#~{row['Scrip Name']}"
 
     display_df["Stock"] = display_df.apply(_stock_link, axis=1)
 
-    # Reorder so Stock (clickable scrip name) is first; drop the now-redundant
-    # plain Scrip Name and Ticker columns.
-    # Carry the stop-loss trigger flag before we drop internal columns
-    sl_flags = display_df["_sl_triggered"].tolist() if "_sl_triggered" in display_df.columns else []
+    # Grab sl_flags before dropping the internal column
+    sl_flags = display_df["_sl_triggered"].tolist()
+
+    # Only show Stop Loss columns when at least one stock has one set
+    has_sl = display_df["Stop Loss"].apply(lambda x: x != "").any()
 
     final_cols = ["Stock", "Weightage %", "Units", "Buy Date", "Buy Price",
                   "Current Price", "Stop Loss", "🚨 SL Hit",
                   "Invested Amount", "Market Value", "P/L",
                   "P/L %", "Days Held", "XIRR %", "Today Chg", "% Chg", "Industry"]
-    # Only include Stop Loss / SL Hit if any stock has a stop loss set
-    has_sl = table["Stop Loss"].apply(lambda x: x != "").any() if "Stop Loss" in table.columns else False
     if not has_sl:
         final_cols = [c for c in final_cols if c not in ("Stop Loss", "🚨 SL Hit")]
 
