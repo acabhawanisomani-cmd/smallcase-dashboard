@@ -693,6 +693,49 @@ def render_smallcase(sc: dict):
             db.delete_smallcase(sc_id)
             st.rerun()
 
+    # ── Group assignment row ────────────────────────────────────────────────
+    gcol1, gcol2 = st.columns([2, 4])
+    with gcol1:
+        # Collect all existing group names for a handy dropdown
+        existing_groups = sorted({
+            s.get("group_name", "").strip()
+            for s in db.get_all_smallcases()
+            if s.get("group_name", "").strip()
+        })
+        current_group = (sc.get("group_name") or "").strip()
+        # Selectbox with "＋ New group…" option + current value pre-selected
+        options = existing_groups if existing_groups else []
+        if current_group and current_group not in options:
+            options = [current_group] + options
+        options_with_new = options + ["＋ New group…"]
+        default_idx = options_with_new.index(current_group) if current_group in options_with_new else 0
+        chosen = st.selectbox(
+            "📂 Group",
+            options=options_with_new,
+            index=default_idx,
+            key=f"grp_sel_{sc_id}",
+            help="Assign this folio to a group for the Master Dashboard view",
+        )
+    with gcol2:
+        if chosen == "＋ New group…":
+            new_group_name = st.text_input(
+                "New group name",
+                placeholder="e.g. Smallcase / App / R Wadiwala",
+                key=f"grp_new_{sc_id}",
+            )
+            if st.button("💾 Save Group", key=f"grp_save_{sc_id}"):
+                if new_group_name.strip():
+                    db.update_smallcase(sc_id, group_name=new_group_name.strip())
+                    st.success(f"Group set to '{new_group_name.strip()}'")
+                    st.rerun()
+        else:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if chosen != current_group:
+                if st.button("💾 Save Group", key=f"grp_save_{sc_id}"):
+                    db.update_smallcase(sc_id, group_name=chosen)
+                    st.success(f"Group set to '{chosen}'")
+                    st.rerun()
+
     total_amount = new_amount
 
     # ── Add Stock Form ──────────────────────────────────────────────────────
