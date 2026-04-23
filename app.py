@@ -400,7 +400,11 @@ def render_master_dashboard():
         key="master_search_input",
     )
     if search_query and len(search_query) >= 2:
-        results = db.search_holdings(search_query)
+        try:
+            results = db.search_holdings(search_query)
+        except Exception as _se:
+            st.error(f"Search error: {_se}")
+            results = []
         if results:
             live_tickers = list({r["ticker"] for r in results})
             live_data = fin.fetch_live_data(live_tickers)
@@ -1808,31 +1812,40 @@ def render_smallcase(sc: dict):
 
         st.dataframe(display_txns, width="stretch", hide_index=True)
 
-        # ── Excel download ──────────────────────────────────────────────────
+        # ── Download button (Excel with CSV fallback) ───────────────────────
+        file_label = selected_ticker if selected_ticker != "All Stocks" else "All_Stocks"
+        sc_name_safe = sc["name"].replace(" ", "_")
         with col_dl:
             st.write("")  # spacing to align with selectbox
             st.write("")
-            # Build Excel in memory
-            excel_buf = io.BytesIO()
-            with pd.ExcelWriter(excel_buf, engine="openpyxl") as writer:
-                export_df = display_txns.copy()
-                export_df.to_excel(writer, index=False, sheet_name="Transactions")
-                ws = writer.sheets["Transactions"]
-                # Auto-width columns
-                for col_cells in ws.columns:
-                    max_len = max(len(str(cell.value)) if cell.value else 0 for cell in col_cells)
-                    ws.column_dimensions[col_cells[0].column_letter].width = max(max_len + 2, 12)
-            excel_buf.seek(0)
-
-            file_label = selected_ticker if selected_ticker != "All Stocks" else "All_Stocks"
-            sc_name_safe = sc["name"].replace(" ", "_")
-            st.download_button(
-                label="⬇️ Download Excel",
-                data=excel_buf,
-                file_name=f"{sc_name_safe}_{file_label}_transactions.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key=f"dl_txn_{sc_id}_{selected_ticker}",
-            )
+            try:
+                import openpyxl  # noqa — ensure it's available
+                excel_buf = io.BytesIO()
+                with pd.ExcelWriter(excel_buf, engine="openpyxl") as writer:
+                    export_df = display_txns.copy()
+                    export_df.to_excel(writer, index=False, sheet_name="Transactions")
+                    ws = writer.sheets["Transactions"]
+                    for col_cells in ws.columns:
+                        max_len = max((len(str(cell.value)) if cell.value else 0) for cell in col_cells)
+                        ws.column_dimensions[col_cells[0].column_letter].width = max(max_len + 2, 12)
+                excel_buf.seek(0)
+                st.download_button(
+                    label="⬇️ Download Excel",
+                    data=excel_buf,
+                    file_name=f"{sc_name_safe}_{file_label}_transactions.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"dl_txn_{sc_id}_{selected_ticker}",
+                )
+            except Exception:
+                # Fallback to CSV if openpyxl unavailable
+                csv_bytes = display_txns.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    label="⬇️ Download CSV",
+                    data=csv_bytes,
+                    file_name=f"{sc_name_safe}_{file_label}_transactions.csv",
+                    mime="text/csv",
+                    key=f"dl_txn_{sc_id}_{selected_ticker}",
+                )
     else:
         st.info("No transactions recorded yet.")
 
