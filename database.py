@@ -108,6 +108,7 @@ def init_db():
                 description TEXT DEFAULT '',
                 total_investable_amount DOUBLE PRECISION DEFAULT 0,
                 is_design_mode INTEGER DEFAULT 0,
+                group_name TEXT DEFAULT '',
                 created_at TIMESTAMP DEFAULT NOW(),
                 updated_at TIMESTAMP DEFAULT NOW()
             )
@@ -152,6 +153,7 @@ def init_db():
                 description TEXT DEFAULT '',
                 total_investable_amount REAL DEFAULT 0,
                 is_design_mode INTEGER DEFAULT 0,
+                group_name TEXT DEFAULT '',
                 created_at TEXT DEFAULT (datetime('now','localtime')),
                 updated_at TEXT DEFAULT (datetime('now','localtime'))
             )
@@ -190,16 +192,19 @@ def init_db():
         """)
 
     # ── Migrations: add columns that didn't exist in older schema ──
-    # stop_loss column — safe to run every time (ignored if column already exists)
     try:
         if _USE_PG:
             cur.execute("ALTER TABLE holdings ADD COLUMN IF NOT EXISTS stop_loss DOUBLE PRECISION DEFAULT 0")
+            cur.execute("ALTER TABLE smallcases ADD COLUMN IF NOT EXISTS group_name TEXT DEFAULT ''")
         else:
-            # SQLite doesn't support IF NOT EXISTS on ALTER TABLE, so check manually
             cur.execute("PRAGMA table_info(holdings)")
-            cols = [r[1] for r in cur.fetchall()]
-            if "stop_loss" not in cols:
+            h_cols = [r[1] for r in cur.fetchall()]
+            if "stop_loss" not in h_cols:
                 cur.execute("ALTER TABLE holdings ADD COLUMN stop_loss REAL DEFAULT 0")
+            cur.execute("PRAGMA table_info(smallcases)")
+            s_cols = [r[1] for r in cur.fetchall()]
+            if "group_name" not in s_cols:
+                cur.execute("ALTER TABLE smallcases ADD COLUMN group_name TEXT DEFAULT ''")
     except Exception:
         pass  # Column already exists — ignore
 
@@ -626,6 +631,41 @@ def get_transactions(smallcase_id: int) -> pd.DataFrame:
     )
     conn.close()
     return df
+
+
+def log_transaction(holding_id: int, smallcase_id: int, ticker: str,
+                    action: str, units: float, price: float, txn_date: str):
+    """Insert a single transaction row using the correct placeholder for the active DB backend."""
+    conn = get_connection()
+    conn.cursor().execute(
+        f"INSERT INTO transactions (holding_id, smallcase_id, ticker, action, units, price, transaction_date) "
+        f"VALUES ({_ph(7)})",
+        (holding_id, smallcase_id, ticker, action, units, price, txn_date)
+    )
+    conn.commit()
+    conn.close()
+
+
+def search_holdings(query: str) -> list[dict]:
+    """Search all active holdings by scrip_name or ticker across all smallcases.
+    Returns list of dicts with holding + smallcase info."""
+    conn = get_connection()
+    ph = _ph()
+    like = f"%{query.strip().upper()}%"
+    cur = conn.cursor()
+    cur.execute(f"""
+        SELECT h.id, h.ticker, h.scrip_name, h.industry, h.weightage,
+               h.buy_price, h.units, h.buy_date, h.stop_loss,
+               s.id AS sc_id, s.name AS sc_name, s.group_name
+        FROM holdings h
+        JOIN smallcases s ON s.id = h.smallcase_id
+        WHERE h.is_active = 1
+          AND (UPPER(h.scrip_name) LIKE {ph} OR UPPER(h.ticker) LIKE {ph})
+        ORDER BY s.group_name, s.name, h.scrip_name
+    """, (like, like))
+    rows = _fetchall_dict(cur)
+    conn.close()
+    return rows
 
 
 init_db()

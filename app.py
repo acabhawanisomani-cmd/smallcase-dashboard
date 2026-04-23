@@ -9,6 +9,7 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, date
+import io
 import database as db
 import finance as fin
 
@@ -345,6 +346,8 @@ with st.sidebar.expander("➕ Create New Smallcase", expanded=False):
     with st.form("new_sc_form"):
         sc_name = st.text_input("Smallcase Name")
         sc_desc = st.text_input("Description")
+        sc_group = st.text_input("Group (e.g. Smallcase / App / R Wadiwala)",
+                                  help="Group multiple folios together on the Master Dashboard")
         sc_amount = st.number_input("Total Investable Amount (₹)", min_value=0.0,
                                     value=100000.0, step=10000.0)
         sc_design = st.checkbox("Design Mode (Simulation)", value=False)
@@ -352,6 +355,12 @@ with st.sidebar.expander("➕ Create New Smallcase", expanded=False):
         if submitted and sc_name:
             try:
                 db.create_smallcase(sc_name, sc_desc, sc_amount, sc_design)
+                # Save group name immediately after creation
+                new_sc_list = db.get_all_smallcases()
+                for s in new_sc_list:
+                    if s["name"] == sc_name:
+                        db.update_smallcase(s["id"], group_name=sc_group.strip())
+                        break
                 st.success(f"Created: {sc_name}")
                 st.rerun()
             except Exception as e:
@@ -383,23 +392,75 @@ def render_master_dashboard():
         st.info("Create your first smallcase from the sidebar to get started.")
         return
 
+    # ── Master Search ────────────────────────────────────────────────────────
+    st.subheader("🔍 Master Search")
+    search_query = st.text_input(
+        "Search any stock across all folios",
+        placeholder="Type stock name or ticker e.g. SBILIFE, Infosys...",
+        key="master_search_input",
+    )
+    if search_query and len(search_query) >= 2:
+        results = db.search_holdings(search_query)
+        if results:
+            live_tickers = list({r["ticker"] for r in results})
+            live_data = fin.fetch_live_data(live_tickers)
+            sr_rows = []
+            for r in results:
+                ld = live_data.get(r["ticker"], fin._empty_quote())
+                cp = ld["current_price"] if ld["current_price"] > 0 else r["buy_price"]
+                invested = round(r["units"] * r["buy_price"], 2)
+                mkt_val  = round(r["units"] * cp, 2)
+                pnl      = round(mkt_val - invested, 2)
+                sr_rows.append({
+                    "Group":      r["group_name"] or "—",
+                    "Folio":      r["sc_name"],
+                    "Stock":      r["scrip_name"],
+                    "Ticker":     r["ticker"],
+                    "Wt %":       r["weightage"],
+                    "Units":      round(r["units"], 2),
+                    "Buy Price":  r["buy_price"],
+                    "Cur Price":  cp,
+                    "Invested":   invested,
+                    "Mkt Value":  mkt_val,
+                    "P/L":        pnl,
+                    "P/L %":      round(pnl / invested * 100, 2) if invested > 0 else 0,
+                })
+            sr_df = pd.DataFrame(sr_rows)
+            st.success(f"Found **{len(sr_df)}** position(s) matching **'{search_query}'**")
+            st.dataframe(
+                sr_df.style
+                    .map(color_pnl, subset=["P/L", "P/L %"])
+                    .format({
+                        "Wt %":      "{:.1f}%",
+                        "Units":     "{:.2f}",
+                        "Buy Price": "₹{:,.2f}",
+                        "Cur Price": "₹{:,.2f}",
+                        "Invested":  "₹{:,.0f}",
+                        "Mkt Value": "₹{:,.0f}",
+                        "P/L":       "₹{:,.0f}",
+                        "P/L %":     "{:.2f}%",
+                    }),
+                width="stretch", hide_index=True,
+            )
+        else:
+            st.warning(f"No active holdings found matching '{search_query}'")
+
+    st.markdown("---")
+
     # Aggregate data across all live (non-design) smallcases
     total_invested = 0
     total_market_val = 0
     total_unrealized = 0
     total_realized = 0
     sector_data = {}
-    sc_summaries = []
+    sc_summaries = []   # flat list for all smallcases
+    group_totals = {}   # group_name → aggregated metrics
 
     for sc in all_sc:
         if sc["is_design_mode"]:
             continue
-        # Realized P/L from exited holdings (even if the smallcase is now empty)
         realized = db.get_realized_pnl(sc["id"])["total_realized"]
-
         holdings = db.get_holdings(sc["id"])
-        if holdings.empty and realized == 0:
-            continue
 
         if not holdings.empty:
             table = build_holdings_table(holdings, sc["total_investable_amount"])
@@ -408,74 +469,116 @@ def render_master_dashboard():
 
         if not table.empty:
             inv = table["Invested Amount"].sum()
-            mv = table["Market Value"].sum()
-            pl = table["P/L"].sum()
+            mv  = table["Market Value"].sum()
+            pl  = table["P/L"].sum()
         else:
             inv = mv = pl = 0
 
-        total_invested += inv
-        total_market_val += mv
-        total_unrealized += pl
-        total_realized += realized
+        if inv == 0 and realized == 0:
+            continue
 
-        # Sector aggregation
+        total_invested    += inv
+        total_market_val  += mv
+        total_unrealized  += pl
+        total_realized    += realized
+
         if not table.empty:
             for _, row in table.iterrows():
                 ind = row["Industry"] if row["Industry"] else "Unknown"
                 sector_data[ind] = sector_data.get(ind, 0) + row["Market Value"]
 
         combined_pl = pl + realized
+        grp = sc.get("group_name") or "Ungrouped"
         sc_summaries.append({
-            "Smallcase": sc["name"],
-            "Invested": inv,
+            "Group":        grp,
+            "Folio":        sc["name"],
+            "Invested":     inv,
             "Market Value": mv,
             "Unrealized P/L": pl,
             "Realized P/L": realized,
-            "Total P/L": combined_pl,
-            "Total P/L %": round(combined_pl / inv * 100, 2) if inv > 0 else 0,
-            "Stocks": len(table) if not table.empty else 0,
+            "Total P/L":    combined_pl,
+            "Total P/L %":  round(combined_pl / inv * 100, 2) if inv > 0 else 0,
+            "Stocks":       len(table) if not table.empty else 0,
         })
 
-    # Top metric cards
+        # Group-level rollup
+        if grp not in group_totals:
+            group_totals[grp] = {"inv": 0, "mv": 0, "unreal": 0, "real": 0}
+        group_totals[grp]["inv"]    += inv
+        group_totals[grp]["mv"]     += mv
+        group_totals[grp]["unreal"] += pl
+        group_totals[grp]["real"]   += realized
+
+    # ── Top-level metric cards ────────────────────────────────────────────────
     total_pnl = total_unrealized + total_realized
-    pnl_pct = round(total_pnl / total_invested * 100, 2) if total_invested > 0 else 0
+    pnl_pct   = round(total_pnl / total_invested * 100, 2) if total_invested > 0 else 0
     col1, col2, col3, col4, col5 = st.columns(5)
-    with col1:
-        metric_card("Total Invested", format_inr(total_invested))
-    with col2:
-        metric_card("Current Value", format_inr(total_market_val),
-                     "profit" if total_market_val >= total_invested else "loss")
-    with col3:
-        metric_card("Unrealized P/L", format_inr(total_unrealized),
-                     "profit" if total_unrealized >= 0 else "loss")
-    with col4:
-        metric_card("Realized P/L", format_inr(total_realized),
-                     "profit" if total_realized >= 0 else "loss")
-    with col5:
-        metric_card("Total P/L", f"{format_inr(total_pnl)} ({pnl_pct}%)",
-                     "profit" if total_pnl >= 0 else "loss")
+    with col1: metric_card("Total Invested",   format_inr(total_invested))
+    with col2: metric_card("Current Value",    format_inr(total_market_val),
+                            "profit" if total_market_val >= total_invested else "loss")
+    with col3: metric_card("Unrealized P/L",   format_inr(total_unrealized),
+                            "profit" if total_unrealized >= 0 else "loss")
+    with col4: metric_card("Realized P/L",     format_inr(total_realized),
+                            "profit" if total_realized >= 0 else "loss")
+    with col5: metric_card("Total P/L",
+                            f"{format_inr(total_pnl)} ({pnl_pct}%)",
+                            "profit" if total_pnl >= 0 else "loss")
 
     st.markdown("---")
 
-    # Smallcase performance table
+    # ── Group & Folio breakdown ───────────────────────────────────────────────
     if sc_summaries:
-        col_left, col_right = st.columns([3, 2])
+        st.subheader("Portfolio Breakdown by Group")
 
+        groups_sorted = sorted(group_totals.keys())
+        for grp in groups_sorted:
+            gt = group_totals[grp]
+            g_total_pl = gt["unreal"] + gt["real"]
+            g_pl_pct   = round(g_total_pl / gt["inv"] * 100, 2) if gt["inv"] > 0 else 0
+            color_cls  = "profit" if g_total_pl >= 0 else "loss"
+
+            # Group header with summary
+            with st.expander(
+                f"**{grp}**  ·  Invested {format_inr(gt['inv'])}  ·  "
+                f"MktVal {format_inr(gt['mv'])}  ·  "
+                f"Total P/L {format_inr(g_total_pl)} ({g_pl_pct}%)",
+                expanded=True,
+            ):
+                grp_folios = [s for s in sc_summaries if s["Group"] == grp]
+                grp_df = pd.DataFrame(grp_folios).drop(columns=["Group"])
+                st.dataframe(
+                    grp_df.style
+                        .map(color_pnl, subset=["Unrealized P/L", "Realized P/L",
+                                                "Total P/L", "Total P/L %"])
+                        .format({
+                            "Invested":       "₹{:,.0f}",
+                            "Market Value":   "₹{:,.0f}",
+                            "Unrealized P/L": "₹{:,.0f}",
+                            "Realized P/L":   "₹{:,.0f}",
+                            "Total P/L":      "₹{:,.0f}",
+                            "Total P/L %":    "{:.2f}%",
+                        }),
+                    width="stretch", hide_index=True,
+                )
+
+        st.markdown("---")
+
+        col_left, col_right = st.columns([3, 2])
         with col_left:
-            st.subheader("Smallcase Performance")
-            sum_df = pd.DataFrame(sc_summaries)
+            st.subheader("All Folios — Combined View")
+            all_df = pd.DataFrame(sc_summaries)
             st.dataframe(
-                sum_df.style.map(color_pnl,
-                                 subset=["Unrealized P/L", "Realized P/L",
-                                         "Total P/L", "Total P/L %"])
-                     .format({
-                         "Invested": "₹{:,.0f}",
-                         "Market Value": "₹{:,.0f}",
-                         "Unrealized P/L": "₹{:,.0f}",
-                         "Realized P/L": "₹{:,.0f}",
-                         "Total P/L": "₹{:,.0f}",
-                         "Total P/L %": "{:.2f}%",
-                     }),
+                all_df.style
+                    .map(color_pnl, subset=["Unrealized P/L", "Realized P/L",
+                                            "Total P/L", "Total P/L %"])
+                    .format({
+                        "Invested":       "₹{:,.0f}",
+                        "Market Value":   "₹{:,.0f}",
+                        "Unrealized P/L": "₹{:,.0f}",
+                        "Realized P/L":   "₹{:,.0f}",
+                        "Total P/L":      "₹{:,.0f}",
+                        "Total P/L %":    "{:.2f}%",
+                    }),
                 width="stretch", hide_index=True,
             )
 
@@ -491,45 +594,30 @@ def render_master_dashboard():
                 fig.update_traces(textposition='inside', textinfo='percent',
                                   hoverinfo='label+percent+value')
                 fig.update_layout(
-                    paper_bgcolor="rgba(0,0,0,0)",
-                    plot_bgcolor="rgba(0,0,0,0)",
-                    font_color="#e0e0e0",
-                    height=450,
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    font_color="#e0e0e0", height=450,
                     margin=dict(t=20, b=20, l=20, r=20),
                     showlegend=True,
-                    legend=dict(
-                        font=dict(size=9),
-                        orientation="h",
-                        yanchor="top",
-                        y=-0.1,
-                        xanchor="center",
-                        x=0.5,
-                    ),
+                    legend=dict(font=dict(size=9), orientation="h",
+                                yanchor="top", y=-0.1, xanchor="center", x=0.5),
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
     # Capital allocation bar chart
     if sc_summaries:
-        st.subheader("Capital Allocation")
+        st.subheader("Capital Allocation by Folio")
         alloc_df = pd.DataFrame(sc_summaries)
         fig = go.Figure()
-        fig.add_trace(go.Bar(
-            x=alloc_df["Smallcase"], y=alloc_df["Invested"],
-            name="Invested", marker_color="#5c6bc0"
-        ))
-        fig.add_trace(go.Bar(
-            x=alloc_df["Smallcase"], y=alloc_df["Market Value"],
-            name="Market Value", marker_color="#26a69a"
-        ))
+        fig.add_trace(go.Bar(x=alloc_df["Folio"], y=alloc_df["Invested"],
+                             name="Invested",     marker_color="#5c6bc0"))
+        fig.add_trace(go.Bar(x=alloc_df["Folio"], y=alloc_df["Market Value"],
+                             name="Market Value", marker_color="#26a69a"))
         fig.update_layout(
             barmode="group",
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            font_color="#e0e0e0",
-            height=350,
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font_color="#e0e0e0", height=350,
             margin=dict(t=20, b=40),
-            xaxis=dict(showgrid=False),
-            yaxis=dict(showgrid=True, gridcolor="#2d2d44"),
+            xaxis=dict(showgrid=False), yaxis=dict(showgrid=True, gridcolor="#2d2d44"),
         )
         st.plotly_chart(fig, width="stretch")
 
@@ -1033,14 +1121,7 @@ def render_smallcase(sc: dict):
                                                               units=total_units,
                                                               buy_price=avg_price)
 
-                                            conn = db.get_connection()
-                                            conn.execute(
-                                                "INSERT INTO transactions (holding_id, smallcase_id, ticker, action, units, price, transaction_date) "
-                                                "VALUES (?, ?, ?, 'BUY', ?, ?, ?)",
-                                                (h["id"], sc_id, t, add_units, price, exec_date_str)
-                                            )
-                                            conn.commit()
-                                            conn.close()
+                                            db.log_transaction(h["id"], sc_id, t, 'BUY', add_units, price, exec_date_str)
                                             applied.append(f"ADD {t}: +{add_units:.4f} units @ ₹{price:,.2f}, avg ₹{avg_price:,.2f}")
                                         else:
                                             # Actually need to sell (market moved, target units < current)
@@ -1049,34 +1130,15 @@ def render_smallcase(sc: dict):
                                             db.update_holding(h["id"],
                                                               weightage=new_wt,
                                                               units=new_total)
-
-                                            conn = db.get_connection()
-                                            conn.execute(
-                                                "INSERT INTO transactions (holding_id, smallcase_id, ticker, action, units, price, transaction_date) "
-                                                "VALUES (?, ?, ?, 'SELL', ?, ?, ?)",
-                                                (h["id"], sc_id, t, sell_units, price, exec_date_str)
-                                            )
-                                            conn.commit()
-                                            conn.close()
+                                            db.log_transaction(h["id"], sc_id, t, 'SELL', sell_units, price, exec_date_str)
                                             applied.append(f"ADJUST {t}: sold {sell_units:.4f} units @ ₹{price:,.2f} (market value adjustment)")
 
                                     elif action == "REDUCE":
                                         h = curr_map[t]
                                         old_units = h["units"]
                                         sell_units = round(old_units - target_units, 4)
-
-                                        db.update_holding(h["id"],
-                                                          weightage=new_wt,
-                                                          units=target_units)
-
-                                        conn = db.get_connection()
-                                        conn.execute(
-                                            "INSERT INTO transactions (holding_id, smallcase_id, ticker, action, units, price, transaction_date) "
-                                            "VALUES (?, ?, ?, 'SELL', ?, ?, ?)",
-                                            (h["id"], sc_id, t, sell_units, price, exec_date_str)
-                                        )
-                                        conn.commit()
-                                        conn.close()
+                                        db.update_holding(h["id"], weightage=new_wt, units=target_units)
+                                        db.log_transaction(h["id"], sc_id, t, 'SELL', sell_units, price, exec_date_str)
                                         applied.append(f"REDUCE {t}: {h['weight']}% → {new_wt}%, sold {sell_units:.4f} units @ ₹{price:,.2f}")
 
                                 # Update investable amount to rebalance base
@@ -1419,14 +1481,7 @@ def render_smallcase(sc: dict):
                                           buy_price=new_avg_price)
 
                         # Log the BUY transaction
-                        conn = db.get_connection()
-                        conn.execute(
-                            "INSERT INTO transactions (holding_id, smallcase_id, ticker, action, units, price, transaction_date) "
-                            "VALUES (?, ?, ?, 'BUY', ?, ?, ?)",
-                            (h_id_avg, sc_id, avg_ticker, add_units, add_bp, avg_date_str)
-                        )
-                        conn.commit()
-                        conn.close()
+                        db.log_transaction(h_id_avg, sc_id, avg_ticker, 'BUY', add_units, add_bp, avg_date_str)
 
                         # Auto-rebalance LIQUIDCASE
                         if sel_row_avg["Ticker"] != db.RESIDUAL_TICKER:
@@ -1532,15 +1587,7 @@ def render_smallcase(sc: dict):
                                               units=new_units_red)
 
                             # Log the partial SELL transaction
-                            conn = db.get_connection()
-                            conn.execute(
-                                "INSERT INTO transactions (holding_id, smallcase_id, ticker, action, units, price, transaction_date) "
-                                "VALUES (?, ?, ?, 'SELL', ?, ?, ?)",
-                                (h_id_red, sc_id, red_ticker, sold_units,
-                                 red_exit_price, red_date_str)
-                            )
-                            conn.commit()
-                            conn.close()
+                            db.log_transaction(h_id_red, sc_id, red_ticker, 'SELL', sold_units, red_exit_price, red_date_str)
 
                             # Auto-rebalance LIQUIDCASE (freed weightage flows back)
                             rb = db.rebalance_residual(sc_id, total_amount,
@@ -1737,13 +1784,55 @@ def render_smallcase(sc: dict):
     st.subheader("Transaction Log")
     txns = db.get_transactions(sc_id)
     if not txns.empty:
-        st.dataframe(
-            txns[["transaction_date", "ticker", "action", "units", "price"]].rename(columns={
-                "transaction_date": "Date", "ticker": "Ticker", "action": "Action",
-                "units": "Units", "price": "Price",
-            }),
-            width="stretch", hide_index=True,
-        )
+        # ── Stock filter + Excel download ───────────────────────────────────
+        all_tickers = sorted(txns["ticker"].unique().tolist())
+        col_filter, col_dl = st.columns([3, 1])
+        with col_filter:
+            selected_ticker = st.selectbox(
+                "Filter by stock",
+                options=["All Stocks"] + all_tickers,
+                key=f"txn_filter_{sc_id}",
+            )
+        # Apply filter
+        if selected_ticker == "All Stocks":
+            filtered_txns = txns.copy()
+        else:
+            filtered_txns = txns[txns["ticker"] == selected_ticker].copy()
+
+        # Build display DataFrame
+        display_txns = filtered_txns[["transaction_date", "ticker", "action", "units", "price"]].rename(columns={
+            "transaction_date": "Date", "ticker": "Ticker", "action": "Action",
+            "units": "Units", "price": "Price ₹",
+        })
+        display_txns["Value ₹"] = (filtered_txns["units"] * filtered_txns["price"]).round(2).values
+
+        st.dataframe(display_txns, width="stretch", hide_index=True)
+
+        # ── Excel download ──────────────────────────────────────────────────
+        with col_dl:
+            st.write("")  # spacing to align with selectbox
+            st.write("")
+            # Build Excel in memory
+            excel_buf = io.BytesIO()
+            with pd.ExcelWriter(excel_buf, engine="openpyxl") as writer:
+                export_df = display_txns.copy()
+                export_df.to_excel(writer, index=False, sheet_name="Transactions")
+                ws = writer.sheets["Transactions"]
+                # Auto-width columns
+                for col_cells in ws.columns:
+                    max_len = max(len(str(cell.value)) if cell.value else 0 for cell in col_cells)
+                    ws.column_dimensions[col_cells[0].column_letter].width = max(max_len + 2, 12)
+            excel_buf.seek(0)
+
+            file_label = selected_ticker if selected_ticker != "All Stocks" else "All_Stocks"
+            sc_name_safe = sc["name"].replace(" ", "_")
+            st.download_button(
+                label="⬇️ Download Excel",
+                data=excel_buf,
+                file_name=f"{sc_name_safe}_{file_label}_transactions.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key=f"dl_txn_{sc_id}_{selected_ticker}",
+            )
     else:
         st.info("No transactions recorded yet.")
 
