@@ -373,13 +373,59 @@ sc_names = [s["name"] for s in all_sc]
 if not all_sc:
     st.sidebar.info("No smallcases yet. Create one above.")
 
-# Navigation
+# ── Grouped Sidebar Navigation ──────────────────────────────────────────────
 st.sidebar.markdown("---")
-nav = st.sidebar.radio(
-    "Navigate",
-    ["🏠 Master Dashboard"] + [f"{'🧪' if s['is_design_mode'] else '📁'} {s['name']}" for s in all_sc],
-    index=0,
-)
+
+# Session-state based navigation (replaces radio widget)
+if "nav" not in st.session_state:
+    st.session_state["nav"] = "🏠 Master Dashboard"
+
+def _nav_btn(label: str, key: str):
+    """Render a nav button; highlights when active."""
+    is_active = st.session_state["nav"] == label
+    btn_style = (
+        "background:#1a3a5c;color:#fff;border:1px solid #4a9eff;"
+        "border-radius:6px;padding:6px 10px;width:100%;text-align:left;"
+        "cursor:pointer;margin-bottom:3px;font-size:14px;"
+    ) if is_active else (
+        "background:transparent;color:#ccc;border:1px solid transparent;"
+        "border-radius:6px;padding:6px 10px;width:100%;text-align:left;"
+        "cursor:pointer;margin-bottom:3px;font-size:14px;"
+    )
+    if st.sidebar.button(label, key=key, use_container_width=True):
+        st.session_state["nav"] = label
+        st.rerun()
+
+# Master Dashboard — always at top
+_nav_btn("🏠 Master Dashboard", "nav_master")
+
+# Group folios by group_name
+_groups: dict[str, list] = {}
+_ungrouped: list = []
+for _sc in all_sc:
+    _grp = (_sc.get("group_name") or "").strip()
+    _label = f"{'🧪' if _sc['is_design_mode'] else '📁'} {_sc['name']}"
+    if _grp:
+        _groups.setdefault(_grp, []).append((_label, _sc))
+    else:
+        _ungrouped.append((_label, _sc))
+
+# Render each group as a collapsible expander
+for _grp_name, _folios in sorted(_groups.items()):
+    _active_in_group = any(st.session_state["nav"] == lbl for lbl, _ in _folios)
+    with st.sidebar.expander(f"📂 {_grp_name}", expanded=_active_in_group):
+        for _lbl, _sc in _folios:
+            _is_sel = st.session_state["nav"] == _lbl
+            _prefix = "▶ " if _is_sel else "    "
+            if st.button(f"{_prefix}{_lbl}", key=f"nav_{_sc['id']}", use_container_width=True):
+                st.session_state["nav"] = _lbl
+                st.rerun()
+
+# Ungrouped folios (no group assigned yet) — show flat below groups
+for _lbl, _sc in _ungrouped:
+    _nav_btn(_lbl, f"nav_{_sc['id']}")
+
+nav = st.session_state["nav"]
 
 
 # ── Master Dashboard ───────────────────────────────────────────────────────
