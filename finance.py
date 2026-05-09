@@ -6,6 +6,7 @@ import numpy as np
 from datetime import datetime, date, timedelta
 from functools import lru_cache
 import time
+import requests
 import streamlit as st
 
 # Cache for live prices (refreshed per session)
@@ -409,3 +410,53 @@ def get_sector_concentration(industries: list[str], weightages: list[float]) -> 
         key = ind if ind else "Unknown"
         sector_map[key] = sector_map.get(key, 0) + w
     return dict(sorted(sector_map.items(), key=lambda x: -x[1]))
+
+
+# ── Mutual Fund helpers (MFAPI.in) ──────────────────────────────────────────
+
+@st.cache_data(ttl=300, show_spinner=False)
+def search_mutual_funds(query: str) -> list[dict]:
+    """Search mutual fund schemes by name using MFAPI.in (free, no API key)."""
+    if not query or len(query) < 2:
+        return []
+    try:
+        resp = requests.get(
+            f"https://api.mfapi.in/mf/search?q={requests.utils.quote(query)}",
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            return resp.json()  # [{schemeCode, schemeName}]
+    except Exception:
+        pass
+    return []
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_mf_nav(scheme_code: int) -> dict:
+    """Fetch latest NAV + metadata for a scheme from MFAPI.in."""
+    empty = {"nav": 0.0, "nav_date": "", "fund_house": "",
+             "scheme_category": "", "scheme_name": ""}
+    try:
+        resp = requests.get(
+            f"https://api.mfapi.in/mf/{scheme_code}/latest", timeout=10
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            nav_entry = data.get("data", [{}])[0]
+            meta = data.get("meta", {})
+            nav_val = nav_entry.get("nav", "0")
+            return {
+                "nav": round(float(nav_val), 4) if nav_val else 0.0,
+                "nav_date": nav_entry.get("date", ""),
+                "fund_house": meta.get("fund_house", ""),
+                "scheme_category": meta.get("scheme_category", ""),
+                "scheme_name": meta.get("scheme_name", ""),
+            }
+    except Exception:
+        pass
+    return empty
+
+
+def fetch_mf_nav_batch(scheme_codes: list[int]) -> dict[int, dict]:
+    """Fetch NAV for multiple scheme codes."""
+    return {code: fetch_mf_nav(code) for code in scheme_codes}

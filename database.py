@@ -191,6 +191,40 @@ def init_db():
             )
         """)
 
+    # ── Mutual Funds table ──────────────────────────────────────────────────
+    if _USE_PG:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS mutual_funds (
+                id SERIAL PRIMARY KEY,
+                scheme_code INTEGER,
+                fund_name TEXT NOT NULL,
+                amc TEXT DEFAULT '',
+                category TEXT DEFAULT '',
+                units DOUBLE PRECISION DEFAULT 0,
+                avg_nav DOUBLE PRECISION DEFAULT 0,
+                purchase_date TEXT,
+                folio_number TEXT DEFAULT '',
+                notes TEXT DEFAULT '',
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+    else:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS mutual_funds (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scheme_code INTEGER,
+                fund_name TEXT NOT NULL,
+                amc TEXT DEFAULT '',
+                category TEXT DEFAULT '',
+                units REAL DEFAULT 0,
+                avg_nav REAL DEFAULT 0,
+                purchase_date TEXT,
+                folio_number TEXT DEFAULT '',
+                notes TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now','localtime'))
+            )
+        """)
+
     # ── Migrations: add columns that didn't exist in older schema ──
     try:
         if _USE_PG:
@@ -642,6 +676,57 @@ def log_transaction(holding_id: int, smallcase_id: int, ticker: str,
         f"VALUES ({_ph(7)})",
         (holding_id, smallcase_id, ticker, action, units, price, txn_date)
     )
+    conn.commit()
+    conn.close()
+
+
+# ── Mutual Fund CRUD ────────────────────────────────────────────────────────
+
+def get_all_mutual_funds() -> list[dict]:
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM mutual_funds ORDER BY created_at DESC")
+    rows = _fetchall_dict(cur)
+    conn.close()
+    return rows
+
+
+def add_mutual_fund(scheme_code: int, fund_name: str, amc: str, category: str,
+                    units: float, avg_nav: float, purchase_date: str,
+                    folio_number: str = "", notes: str = "") -> int:
+    conn = get_connection()
+    cur = conn.cursor()
+    if _USE_PG:
+        cur.execute(
+            "INSERT INTO mutual_funds (scheme_code, fund_name, amc, category, units, avg_nav, "
+            "purchase_date, folio_number, notes) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+            (scheme_code, fund_name, amc, category, units, avg_nav, purchase_date, folio_number, notes)
+        )
+    else:
+        cur.execute(
+            "INSERT INTO mutual_funds (scheme_code, fund_name, amc, category, units, avg_nav, "
+            "purchase_date, folio_number, notes) VALUES (?,?,?,?,?,?,?,?,?)",
+            (scheme_code, fund_name, amc, category, units, avg_nav, purchase_date, folio_number, notes)
+        )
+    mf_id = _last_id(cur, "mutual_funds")
+    conn.commit()
+    conn.close()
+    return mf_id
+
+
+def update_mutual_fund(mf_id: int, **kwargs):
+    conn = get_connection()
+    ph = _ph()
+    sets = ", ".join(f"{k} = {ph}" for k in kwargs)
+    vals = list(kwargs.values()) + [mf_id]
+    conn.cursor().execute(f"UPDATE mutual_funds SET {sets} WHERE id = {ph}", vals)
+    conn.commit()
+    conn.close()
+
+
+def delete_mutual_fund(mf_id: int):
+    conn = get_connection()
+    conn.cursor().execute(f"DELETE FROM mutual_funds WHERE id = {_ph()}", (mf_id,))
     conn.commit()
     conn.close()
 
