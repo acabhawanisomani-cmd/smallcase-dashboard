@@ -1947,64 +1947,83 @@ def render_mutual_funds():
     st.title("📊 Mutual Fund Portfolio")
     st.caption(f"Live NAV from MFAPI.in · Last refreshed: {datetime.now().strftime('%d %b %Y, %I:%M %p')}")
 
-    all_mf = db.get_all_mutual_funds()
+    try:
+        all_mf = db.get_all_mutual_funds()
+    except Exception as _e:
+        st.error(f"Database error: {_e}")
+        return
 
     # ── Add Fund ────────────────────────────────────────────────────────────
     with st.expander("➕ Add Mutual Fund", expanded=not all_mf):
         st.markdown("**Step 1 — Search for a fund**")
-        mf_search_q = st.text_input("Search fund name", placeholder="e.g. SBI Bluechip, HDFC Midcap...",
-                                    key="mf_search_q")
+        mf_search_q = st.text_input(
+            "Search fund name",
+            placeholder="e.g. SBI Bluechip, HDFC Midcap, Parag Parikh...",
+            key="mf_search_q",
+        )
         search_results = []
         if mf_search_q and len(mf_search_q) >= 3:
-            with st.spinner("Searching..."):
+            with st.spinner("Searching AMFI database..."):
                 search_results = fin.search_mutual_funds(mf_search_q)
 
         selected_scheme_code = None
         selected_scheme_name = ""
+        mf_meta = {}
         if search_results:
-            fund_options = {r["schemeName"]: r["schemeCode"] for r in search_results[:30]}
-            chosen_name = st.selectbox("Select Fund", options=list(fund_options.keys()), key="mf_sel")
+            fund_options = {r["schemeName"]: r["schemeCode"] for r in search_results[:40]}
+            chosen_name = st.selectbox(
+                "Select Fund", options=list(fund_options.keys()), key="mf_sel"
+            )
             selected_scheme_code = fund_options[chosen_name]
             selected_scheme_name = chosen_name
-
-            # Auto-fetch meta for the selected fund
             with st.spinner("Fetching fund details..."):
                 mf_meta = fin.fetch_mf_nav(selected_scheme_code)
-            c1, c2, c3 = st.columns(3)
-            c1.info(f"**AMC:** {mf_meta['fund_house'] or '—'}")
-            c2.info(f"**Category:** {mf_meta['scheme_category'] or '—'}")
-            c3.info(f"**Current NAV:** ₹{mf_meta['nav']:,.4f}  ({mf_meta['nav_date']})")
+            ci1, ci2, ci3 = st.columns(3)
+            ci1.info(f"**AMC:** {mf_meta.get('fund_house') or '—'}")
+            ci2.info(f"**Category:** {mf_meta.get('scheme_category') or '—'}")
+            ci3.info(f"**Current NAV:** ₹{mf_meta.get('nav', 0):,.4f}  ({mf_meta.get('nav_date', '')})")
 
-        st.markdown("**Step 2 — Enter your purchase details**")
+        st.markdown("**Step 2 — Enter your investment details**")
         with st.form("add_mf_form"):
             fc1, fc2 = st.columns(2)
             with fc1:
-                mf_units    = st.number_input("Units held", min_value=0.0, step=0.001, format="%.3f", key="mf_units")
-                mf_avg_nav  = st.number_input("Average Purchase NAV (₹)", min_value=0.0, step=0.01, key="mf_avg_nav")
+                # Invested amount instead of units — units calculated internally
+                mf_invested = st.number_input(
+                    "Amount Invested (₹)", min_value=0.0, step=1000.0,
+                    format="%.2f", key="mf_invested",
+                    help="Total ₹ amount you put into this fund",
+                )
+                mf_avg_nav = st.number_input(
+                    "Average Purchase NAV (₹)", min_value=0.0, step=0.01,
+                    key="mf_avg_nav",
+                    help="Average NAV at which you purchased (check your statement)",
+                )
             with fc2:
-                mf_date     = st.date_input("Purchase / Start Date", value=date.today(), key="mf_date")
-                mf_folio    = st.text_input("Folio Number (optional)", key="mf_folio")
-            mf_notes = st.text_input("Notes (optional)", key="mf_notes")
-            mf_submit = st.form_submit_button("Add Fund")
+                mf_date  = st.date_input("Purchase / Start Date", value=date.today(), key="mf_date")
+                mf_folio = st.text_input("Folio Number (optional)", key="mf_folio")
+            mf_notes  = st.text_input("Notes (optional)", key="mf_notes")
+            mf_submit = st.form_submit_button("➕ Add Fund")
             if mf_submit:
                 if not selected_scheme_code:
-                    st.error("Please search and select a fund first.")
-                elif mf_units <= 0 or mf_avg_nav <= 0:
-                    st.error("Units and Average NAV must be greater than 0.")
+                    st.error("Please search and select a fund first (Step 1).")
+                elif mf_invested <= 0 or mf_avg_nav <= 0:
+                    st.error("Amount Invested and Average NAV must be greater than 0.")
                 else:
+                    # Calculate units from invested amount / avg NAV
+                    computed_units = round(mf_invested / mf_avg_nav, 4)
                     meta = fin.fetch_mf_nav(selected_scheme_code)
                     db.add_mutual_fund(
                         scheme_code=selected_scheme_code,
                         fund_name=selected_scheme_name,
-                        amc=meta["fund_house"],
-                        category=meta["scheme_category"],
-                        units=mf_units,
+                        amc=meta.get("fund_house", ""),
+                        category=meta.get("scheme_category", ""),
+                        units=computed_units,
                         avg_nav=mf_avg_nav,
                         purchase_date=str(mf_date),
                         folio_number=mf_folio,
                         notes=mf_notes,
                     )
-                    st.success(f"Added: {selected_scheme_name}")
+                    st.success(f"✅ Added: {selected_scheme_name}  ({computed_units} units @ ₹{mf_avg_nav})")
                     st.rerun()
 
     if not all_mf:
@@ -2021,37 +2040,38 @@ def render_mutual_funds():
     total_invested = 0.0
     total_current  = 0.0
     for mf in all_mf:
-        sc = mf.get("scheme_code")
+        sc       = mf.get("scheme_code")
         nav_info = nav_data.get(sc, {}) if sc else {}
-        cur_nav  = nav_info.get("nav", 0.0)
+        cur_nav  = float(nav_info.get("nav", 0) or 0)
         units    = float(mf.get("units", 0) or 0)
         avg_nav  = float(mf.get("avg_nav", 0) or 0)
         invested = round(units * avg_nav, 2)
         cur_val  = round(units * cur_nav, 2) if cur_nav > 0 else 0.0
         abs_ret  = round(cur_val - invested, 2)
         pct_ret  = round((abs_ret / invested * 100), 2) if invested > 0 else 0.0
-        # XIRR
-        xirr_val = fin.calculate_xirr(
-            mf.get("purchase_date", ""), avg_nav, units, cur_nav
-        ) if cur_nav > 0 and avg_nav > 0 else None
-
+        xirr_val = None
+        if cur_nav > 0 and avg_nav > 0 and units > 0:
+            xirr_val = fin.calculate_xirr(
+                mf.get("purchase_date", ""), avg_nav, units, cur_nav
+            )
         total_invested += invested
         total_current  += cur_val
-
         rows.append({
-            "Fund Name":    mf["fund_name"],
-            "AMC":          mf.get("amc") or nav_info.get("fund_house", ""),
-            "Category":     mf.get("category") or nav_info.get("scheme_category", ""),
-            "Units":        round(units, 3),
-            "Avg NAV ₹":   round(avg_nav, 4),
+            "Fund Name":      mf["fund_name"],
+            "AMC":            mf.get("amc") or nav_info.get("fund_house", ""),
+            "Category":       mf.get("category") or nav_info.get("scheme_category", ""),
+            "Avg NAV ₹":     round(avg_nav, 4),
             "Current NAV ₹": round(cur_nav, 4),
-            "NAV Date":     nav_info.get("nav_date", ""),
-            "Invested ₹":  invested,
-            "Cur Value ₹": cur_val,
-            "P/L ₹":       abs_ret,
-            "Return %":    pct_ret,
-            "XIRR %":      xirr_val if xirr_val is not None else "—",
-            "_id":          mf["id"],
+            "NAV Date":       nav_info.get("nav_date", ""),
+            "Invested ₹":    invested,
+            "Cur Value ₹":   cur_val,
+            "P/L ₹":         abs_ret,
+            "Return %":       pct_ret,
+            "XIRR %":         f"{xirr_val:.2f}%" if xirr_val is not None else "—",
+            "_id":             mf["id"],
+            "_units":          units,
+            "_avg_nav":        avg_nav,
+            "_folio":          mf.get("folio_number", ""),
         })
 
     total_pnl = round(total_current - total_invested, 2)
@@ -2059,83 +2079,94 @@ def render_mutual_funds():
 
     # ── Summary metrics ─────────────────────────────────────────────────────
     m1, m2, m3, m4 = st.columns(4)
-    def _mf_metric(col, label, val, color="white"):
+    def _mf_metric(col, label, val, is_pct=False, color="white"):
+        if is_pct:
+            display = f"{val:+.2f}%"
+        else:
+            display = f"₹{val:,.0f}"
         col.markdown(
             f"""<div style="background:linear-gradient(135deg,#1e2a3a,#0d1b2a);
             border-radius:12px;padding:18px;text-align:center;border:1px solid #2d4a6a;">
             <p style="color:#8899aa;font-size:11px;letter-spacing:1px;margin:0">{label}</p>
-            <p style="color:{color};font-size:22px;font-weight:700;margin:5px 0">₹{val:,.0f}</p></div>""",
+            <p style="color:{color};font-size:22px;font-weight:700;margin:5px 0">{display}</p></div>""",
             unsafe_allow_html=True,
         )
     _mf_metric(m1, "TOTAL INVESTED", total_invested)
     _mf_metric(m2, "CURRENT VALUE", total_current)
-    _mf_metric(m3, "TOTAL P/L", total_pnl, "#4caf50" if total_pnl >= 0 else "#f44336")
-    m4.markdown(
-        f"""<div style="background:linear-gradient(135deg,#1e2a3a,#0d1b2a);
-        border-radius:12px;padding:18px;text-align:center;border:1px solid #2d4a6a;">
-        <p style="color:#8899aa;font-size:11px;letter-spacing:1px;margin:0">OVERALL RETURN</p>
-        <p style="color:{'#4caf50' if total_ret >= 0 else '#f44336'};font-size:22px;font-weight:700;margin:5px 0">
-        {total_ret:+.2f}%</p></div>""",
-        unsafe_allow_html=True,
-    )
+    _mf_metric(m3, "TOTAL P/L", total_pnl, color="#4caf50" if total_pnl >= 0 else "#f44336")
+    _mf_metric(m4, "OVERALL RETURN", total_ret, is_pct=True,
+               color="#4caf50" if total_ret >= 0 else "#f44336")
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # ── Holdings table ───────────────────────────────────────────────────────
+    # ── Holdings table (no Units column shown) ───────────────────────────────
     if rows:
         df = pd.DataFrame(rows)
-        display_df = df.drop(columns=["_id"])
+        display_df = df.drop(columns=["_id", "_units", "_avg_nav", "_folio"])
         st.dataframe(
             display_df.style
                 .map(color_pnl, subset=["P/L ₹", "Return %"])
                 .format({
-                    "Units":         "{:.3f}",
-                    "Avg NAV ₹":    "₹{:,.4f}",
+                    "Avg NAV ₹":     "₹{:,.4f}",
                     "Current NAV ₹": "₹{:,.4f}",
-                    "Invested ₹":   "₹{:,.2f}",
-                    "Cur Value ₹":  "₹{:,.2f}",
-                    "P/L ₹":        "₹{:,.2f}",
-                    "Return %":     "{:.2f}%",
+                    "Invested ₹":    "₹{:,.2f}",
+                    "Cur Value ₹":   "₹{:,.2f}",
+                    "P/L ₹":         "₹{:,.2f}",
+                    "Return %":       "{:.2f}%",
                 }),
             width="stretch", hide_index=True,
         )
 
     # ── Edit / Delete per fund ───────────────────────────────────────────────
     st.subheader("Manage Holdings")
-    for mf in all_mf:
-        with st.expander(f"⚙️ {mf['fund_name']}", expanded=False):
+    for row in rows:
+        mf_id = row["_id"]
+        with st.expander(f"⚙️ {row['Fund Name']}", expanded=False):
             ec1, ec2, ec3, ec4 = st.columns([2, 2, 2, 1])
-            new_units   = ec1.number_input("Units", value=float(mf.get("units") or 0),
-                                           min_value=0.0, step=0.001, format="%.3f",
-                                           key=f"mfe_units_{mf['id']}")
-            new_avg_nav = ec2.number_input("Avg NAV ₹", value=float(mf.get("avg_nav") or 0),
-                                           min_value=0.0, step=0.01,
-                                           key=f"mfe_nav_{mf['id']}")
-            new_folio   = ec3.text_input("Folio No.", value=mf.get("folio_number") or "",
-                                         key=f"mfe_folio_{mf['id']}")
+            # Edit by invested amount — keep units hidden
+            cur_invested = round(row["_units"] * row["_avg_nav"], 2)
+            new_invested = ec1.number_input(
+                "Amount Invested (₹)", value=cur_invested,
+                min_value=0.0, step=1000.0, format="%.2f",
+                key=f"mfe_inv_{mf_id}",
+            )
+            new_avg_nav = ec2.number_input(
+                "Avg NAV ₹", value=row["_avg_nav"],
+                min_value=0.0, step=0.01,
+                key=f"mfe_nav_{mf_id}",
+            )
+            new_folio = ec3.text_input(
+                "Folio No.", value=row["_folio"],
+                key=f"mfe_folio_{mf_id}",
+            )
             ec4.markdown("<br>", unsafe_allow_html=True)
             col_save, col_del = ec4.columns(2)
-            if col_save.button("💾", key=f"mfe_save_{mf['id']}", help="Save changes"):
-                db.update_mutual_fund(mf["id"], units=new_units, avg_nav=new_avg_nav,
+            if col_save.button("💾", key=f"mfe_save_{mf_id}", help="Save changes"):
+                new_units = round(new_invested / new_avg_nav, 4) if new_avg_nav > 0 else 0
+                db.update_mutual_fund(mf_id, units=new_units, avg_nav=new_avg_nav,
                                       folio_number=new_folio)
                 st.success("Updated!")
                 st.rerun()
-            if col_del.button("🗑️", key=f"mfe_del_{mf['id']}", help="Delete this fund"):
-                db.delete_mutual_fund(mf["id"])
+            if col_del.button("🗑️", key=f"mfe_del_{mf_id}", help="Delete this fund"):
+                db.delete_mutual_fund(mf_id)
                 st.rerun()
 
-    # ── Excel download ───────────────────────────────────────────────────────
+    # ── Excel / CSV download ─────────────────────────────────────────────────
     st.markdown("---")
     try:
         import openpyxl  # noqa
         dl_buf = io.BytesIO()
         with pd.ExcelWriter(dl_buf, engine="openpyxl") as writer:
-            pd.DataFrame(rows).drop(columns=["_id"]).to_excel(writer, index=False, sheet_name="MF Holdings")
+            pd.DataFrame(rows).drop(columns=["_id", "_units", "_avg_nav", "_folio"]).to_excel(
+                writer, index=False, sheet_name="MF Holdings"
+            )
         dl_buf.seek(0)
         st.download_button("⬇️ Download Excel", data=dl_buf,
                            file_name="mutual_fund_holdings.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     except Exception:
-        csv_bytes = pd.DataFrame(rows).drop(columns=["_id"]).to_csv(index=False).encode()
+        csv_bytes = (pd.DataFrame(rows)
+                     .drop(columns=["_id", "_units", "_avg_nav", "_folio"])
+                     .to_csv(index=False).encode())
         st.download_button("⬇️ Download CSV", data=csv_bytes,
                            file_name="mutual_fund_holdings.csv", mime="text/csv")
 
