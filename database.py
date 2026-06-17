@@ -384,6 +384,17 @@ def delete_holding(holding_id: int):
     conn.close()
 
 
+def delete_all_active_holdings(smallcase_id: int):
+    """Remove all active holdings for a folio — used by R Wadiwala statement import."""
+    conn = get_connection()
+    conn.cursor().execute(
+        f"DELETE FROM holdings WHERE smallcase_id = {_ph()} AND is_active = 1",
+        (smallcase_id,)
+    )
+    conn.commit()
+    conn.close()
+
+
 def exit_holding(holding_id: int, exit_price: float, exit_date: str):
     conn = get_connection()
     cur = conn.cursor()

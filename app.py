@@ -674,6 +674,238 @@ def render_master_dashboard():
         st.plotly_chart(fig, width="stretch")
 
 
+# ── R Wadiwala Transaction Statement helpers ───────────────────────────────
+
+def _parse_rw_xls(file_bytes: bytes):
+    """
+    Parse R Wadiwala XLS transaction statement (HTML-formatted .xls file).
+    Returns (scheme_name: str, holdings: list[dict], date_range: str).
+    holdings dicts have keys: scrip_name, net_qty, avg_cost, invested.
+    """
+    import io as _io, re as _re
+    tables = pd.read_html(_io.BytesIO(file_bytes))
+    if not tables:
+        raise ValueError("No tables found in the uploaded file.")
+    df = tables[0]
+
+    # Extract scheme name and date range from header row
+    header_text = str(df.iloc[0, 0])
+    scheme_name = ""
+    date_range = ""
+
+    sm = _re.search(r'Scheme:\s*(.+?)\s*As On Date', header_text)
+    if sm:
+        parts = [p.strip() for p in sm.group(1).split('-') if p.strip()]
+        non_meta = [p for p in parts if p.lower() not in ('advisory', 'research', 'research anlaytics')]
+        scheme_name = non_meta[-1] if non_meta else sm.group(1).strip()
+
+    dm = _re.search(r'As On Date:?\s*(\S+)\s*[-–]\s*(\S+)', header_text)
+    if dm:
+        date_range = f"{dm.group(1)} to {dm.group(2)}"
+
+    # Parse transaction rows
+    data_rows, current_group = [], None
+    for _, row in df.iterrows():
+        val = str(row[0]).strip()
+        if val.startswith('Group:'):
+            current_group = val.replace('Group:', '').strip()
+        elif val in ('Group Total', 'Grand Total') or 'Client:' in val or val == 'Scrip Name':
+            continue
+        elif pd.notna(row[1]) and str(row[1]).strip() not in ('Transaction Date', 'NaN', 'nan', ''):
+            try:
+                data_rows.append({
+                    'group': current_group,
+                    'scrip': val,
+                    'date': str(row[1]).strip(),
+                    'type': str(row[2]).strip(),
+                    'qty': float(row[3]),
+                    'rate': float(row[4]),
+                    'amount': float(row[5]),
+                })
+            except Exception:
+                pass
+
+    if not data_rows:
+        raise ValueError("No transaction rows found in the file. Is this the correct format?")
+
+    # Use Equity group rows; fall back to all rows if no groups detected
+    equity_rows = [r for r in data_rows if r['group'] == 'Equity'] or data_rows
+
+    # Calculate net quantity and weighted avg cost per scrip
+    hmap: dict = {}
+    for r in equity_rows:
+        s = r['scrip']
+        if s not in hmap:
+            hmap[s] = {'buy_qty': 0.0, 'buy_amt': 0.0, 'sell_qty': 0.0}
+        if r['type'] == 'Buy':
+            hmap[s]['buy_qty'] += r['qty']
+            hmap[s]['buy_amt'] += abs(r['amount'])
+        elif r['type'] in ('Sale', 'Sell'):
+            hmap[s]['sell_qty'] += r['qty']
+
+    holdings = []
+    for scrip, h in sorted(hmap.items()):
+        net_qty = round(h['buy_qty'] - h['sell_qty'], 4)
+        avg_cost = round(h['buy_amt'] / h['buy_qty'], 4) if h['buy_qty'] > 0 else 0.0
+        holdings.append({
+            'scrip_name': scrip,
+            'net_qty': net_qty,
+            'avg_cost': avg_cost,
+            'invested': round(avg_cost * net_qty, 2),
+        })
+
+    return scheme_name, holdings, date_range
+
+
+def _render_rw_import(sc: dict, sc_id: int, total_amount: float):
+    """Render the R Wadiwala transaction statement import section."""
+    with st.expander("📋 Import R Wadiwala Transaction Statement", expanded=False):
+        st.markdown(
+            "Upload the **Transaction Statement (.xls)** received from R Wadiwala. "
+            "The system will calculate current holdings (net quantity & weighted avg cost) "
+            "from all Buy/Sell transactions and **replace** existing holdings in this folio."
+        )
+        st.warning(
+            "⚠️ Importing will **delete all existing active holdings** in this folio "
+            "and replace them with calculated data from the statement."
+        )
+
+        uploaded = st.file_uploader(
+            "Upload R Wadiwala Transaction Statement (.xls)",
+            type=["xls", "xlsx", "html"],
+            key=f"rw_upload_{sc_id}",
+        )
+
+        if not uploaded:
+            return
+
+        try:
+            raw_bytes = uploaded.read()
+            scheme_name, holdings_raw, date_range = _parse_rw_xls(raw_bytes)
+
+            if not holdings_raw:
+                st.error("No holdings found in the statement.")
+                return
+
+            # Build scrip→ticker map from existing holdings in this folio
+            existing_h = db.get_holdings(sc_id, active_only=False)
+            scrip_to_ticker: dict[str, str] = {}
+            if not existing_h.empty:
+                for _, row in existing_h.iterrows():
+                    sn = (row.get('scrip_name') or '').strip().upper()
+                    tk = (row.get('ticker') or '').strip()
+                    if sn and tk:
+                        scrip_to_ticker[sn] = tk
+
+            # Build editable table
+            edit_rows = []
+            for h in holdings_raw:
+                ticker_guess = scrip_to_ticker.get(h['scrip_name'].upper(), '')
+                edit_rows.append({
+                    'Include': h['net_qty'] > 0,
+                    'Scrip Name': h['scrip_name'],
+                    'NSE Ticker': ticker_guess,
+                    'Net Qty': h['net_qty'],
+                    'Avg Cost (₹)': h['avg_cost'],
+                    'Invested (₹)': h['invested'],
+                })
+
+            edit_df = pd.DataFrame(edit_rows)
+
+            active_count = sum(1 for r in edit_rows if r['Net Qty'] > 0)
+            exited_count = sum(1 for r in edit_rows if r['Net Qty'] == 0)
+
+            st.markdown(
+                f"**Scheme:** {scheme_name} | **Period:** {date_range} | "
+                f"**{active_count}** active positions, **{exited_count}** fully exited"
+            )
+            st.caption(
+                "Fill in the **NSE Ticker** column for each stock. "
+                "Stocks already in this folio are auto-filled. "
+                "Uncheck 'Include' for any stock you want to skip."
+            )
+
+            edited = st.data_editor(
+                edit_df,
+                column_config={
+                    'Include': st.column_config.CheckboxColumn('Include', width='small'),
+                    'Scrip Name': st.column_config.TextColumn('Scrip Name', disabled=True, width='large'),
+                    'NSE Ticker': st.column_config.TextColumn(
+                        'NSE Ticker', width='medium',
+                        help="NSE ticker symbol without .NS suffix (e.g., MANINDS, HFCL, SCI)."
+                    ),
+                    'Net Qty': st.column_config.NumberColumn('Net Qty', disabled=True, format='%.0f', width='small'),
+                    'Avg Cost (₹)': st.column_config.NumberColumn('Avg Cost (₹)', disabled=True, format='%.2f'),
+                    'Invested (₹)': st.column_config.NumberColumn('Invested (₹)', disabled=True, format='%.2f'),
+                },
+                use_container_width=True,
+                hide_index=True,
+                key=f"rw_edit_{sc_id}",
+                num_rows='fixed',
+            )
+
+            to_import = edited[edited['Include'] & (edited['Net Qty'] > 0)].copy()
+            missing_tickers = to_import[to_import['NSE Ticker'].str.strip() == '']
+
+            if not missing_tickers.empty:
+                st.warning(
+                    f"⚠️ {len(missing_tickers)} stock(s) need an NSE Ticker before importing: "
+                    + ', '.join(missing_tickers['Scrip Name'].tolist())
+                )
+
+            total_invested = float(to_import['Invested (₹)'].sum())
+
+            col_info, col_btn = st.columns([3, 1])
+            with col_info:
+                st.markdown(
+                    f"**{len(to_import)}** holdings to import | "
+                    f"Total invested: **₹{total_invested:,.2f}**"
+                )
+            with col_btn:
+                can_import = missing_tickers.empty and not to_import.empty
+                if st.button(
+                    "✅ Confirm Import",
+                    key=f"rw_confirm_{sc_id}",
+                    disabled=not can_import,
+                    type="primary",
+                ):
+                    # Clear all existing active holdings
+                    db.delete_all_active_holdings(sc_id)
+
+                    # Insert calculated holdings
+                    for _, row in to_import.iterrows():
+                        ticker = row['NSE Ticker'].strip().upper()
+                        qty = float(row['Net Qty'])
+                        avg = float(row['Avg Cost (₹)'])
+                        inv = float(row['Invested (₹)'])
+                        wt = round(inv / total_invested * 100, 2) if total_invested > 0 else 0.0
+                        db.add_holding(
+                            smallcase_id=sc_id,
+                            ticker=ticker,
+                            scrip_name=row['Scrip Name'],
+                            industry='',
+                            weightage=wt,
+                            buy_price=avg,
+                            buy_date=date.today().strftime('%Y-%m-%d'),
+                            units=qty,
+                            stop_loss=0.0,
+                        )
+
+                    # Sync total investable amount to statement total
+                    db.update_smallcase(sc_id, total_investable_amount=total_invested)
+                    st.cache_data.clear()
+                    st.success(
+                        f"✅ Imported {len(to_import)} holdings. "
+                        f"Investable amount updated to ₹{total_invested:,.2f}"
+                    )
+                    st.rerun()
+
+        except Exception as e:
+            st.error(f"Error parsing file: {e}")
+            import traceback
+            st.code(traceback.format_exc())
+
+
 # ── Individual Smallcase View ──────────────────────────────────────────────
 
 def render_smallcase(sc: dict):
@@ -785,6 +1017,10 @@ def render_smallcase(sc: dict):
                     st.rerun()
 
     total_amount = new_amount
+
+    # ── R Wadiwala: Transaction Statement Import ────────────────────────────
+    if (sc.get("group_name") or "").strip().lower() == "r wadiwala":
+        _render_rw_import(sc, sc_id, total_amount)
 
     # ── Add Stock Form ──────────────────────────────────────────────────────
     with st.expander("➕ Add Stock", expanded=False):
