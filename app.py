@@ -728,15 +728,15 @@ def _parse_rw_xls(file_bytes: bytes):
     if not data_rows:
         raise ValueError("No transaction rows found in the file. Is this the correct format?")
 
-    # Use Equity group rows; fall back to all rows if no groups detected
-    equity_rows = [r for r in data_rows if r['group'] == 'Equity'] or data_rows
-
-    # Calculate net quantity and weighted avg cost per scrip
+    # Process ALL groups (Equity + Mutual Fund + any others)
+    # so the total invested matches the full capital deployed
     hmap: dict = {}
-    for r in equity_rows:
+    hmap_group: dict = {}
+    for r in data_rows:
         s = r['scrip']
         if s not in hmap:
             hmap[s] = {'buy_qty': 0.0, 'buy_amt': 0.0, 'sell_qty': 0.0}
+            hmap_group[s] = r.get('group') or ''
         if r['type'] == 'Buy':
             hmap[s]['buy_qty'] += r['qty']
             hmap[s]['buy_amt'] += abs(r['amount'])
@@ -749,6 +749,7 @@ def _parse_rw_xls(file_bytes: bytes):
         avg_cost = round(h['buy_amt'] / h['buy_qty'], 4) if h['buy_qty'] > 0 else 0.0
         holdings.append({
             'scrip_name': scrip,
+            'group': hmap_group.get(scrip, ''),
             'net_qty': net_qty,
             'avg_cost': avg_cost,
             'invested': round(avg_cost * net_qty, 2),
@@ -803,6 +804,7 @@ def _render_rw_import(sc: dict, sc_id: int, total_amount: float):
                 ticker_guess = scrip_to_ticker.get(h['scrip_name'].upper(), '')
                 edit_rows.append({
                     'Include': h['net_qty'] > 0,
+                    'Group': h.get('group', ''),
                     'Scrip Name': h['scrip_name'],
                     'NSE Ticker': ticker_guess,
                     'Net Qty': h['net_qty'],
@@ -814,21 +816,24 @@ def _render_rw_import(sc: dict, sc_id: int, total_amount: float):
 
             active_count = sum(1 for r in edit_rows if r['Net Qty'] > 0)
             exited_count = sum(1 for r in edit_rows if r['Net Qty'] == 0)
+            total_all = sum(r['Invested (₹)'] for r in edit_rows if r['Net Qty'] > 0)
 
             st.markdown(
                 f"**Scheme:** {scheme_name} | **Period:** {date_range} | "
-                f"**{active_count}** active positions, **{exited_count}** fully exited"
+                f"**{active_count}** active positions, **{exited_count}** fully exited | "
+                f"**Total invested: ₹{total_all:,.2f}**"
             )
             st.caption(
-                "Fill in the **NSE Ticker** column for each stock. "
+                "Fill in the **NSE Ticker** column for each stock/fund. "
                 "Stocks already in this folio are auto-filled. "
-                "Uncheck 'Include' for any stock you want to skip."
+                "Uncheck 'Include' for any holding you want to skip (e.g. liquid sweep fund)."
             )
 
             edited = st.data_editor(
                 edit_df,
                 column_config={
                     'Include': st.column_config.CheckboxColumn('Include', width='small'),
+                    'Group': st.column_config.TextColumn('Group', disabled=True, width='small'),
                     'Scrip Name': st.column_config.TextColumn('Scrip Name', disabled=True, width='large'),
                     'NSE Ticker': st.column_config.TextColumn(
                         'NSE Ticker', width='medium',
