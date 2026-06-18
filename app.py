@@ -678,15 +678,37 @@ def render_master_dashboard():
 
 def _parse_rw_xls(file_bytes: bytes):
     """
-    Parse R Wadiwala XLS transaction statement (HTML-formatted .xls file).
+    Parse R Wadiwala transaction statement.
+    Supports both HTML-disguised .xls files and real .xlsx/.xls files.
     Returns (scheme_name: str, holdings: list[dict], date_range: str).
-    holdings dicts have keys: scrip_name, net_qty, avg_cost, invested.
+    holdings dicts have keys: scrip_name, group, net_qty, avg_cost, invested.
     """
     import io as _io, re as _re
-    tables = pd.read_html(_io.BytesIO(file_bytes))
-    if not tables:
-        raise ValueError("No tables found in the uploaded file.")
-    df = tables[0]
+
+    df = None
+
+    # Strategy 1 — HTML-formatted XLS (R Wadiwala sends these for some portfolios)
+    try:
+        tables = pd.read_html(_io.BytesIO(file_bytes), flavor='lxml')
+        if tables:
+            df = tables[0]
+    except Exception:
+        pass
+
+    # Strategy 2 — Real Excel file (.xlsx via openpyxl, .xls via xlrd)
+    if df is None:
+        for engine in ('openpyxl', 'xlrd'):
+            try:
+                df = pd.read_excel(_io.BytesIO(file_bytes), header=None, engine=engine)
+                break
+            except Exception:
+                pass
+
+    if df is None or df.empty:
+        raise ValueError(
+            "Could not parse the file. Tried HTML and Excel formats. "
+            "Make sure it is the R Wadiwala Transaction Statement (.xls or .xlsx)."
+        )
 
     # Extract scheme name and date range from header row
     header_text = str(df.iloc[0, 0])
