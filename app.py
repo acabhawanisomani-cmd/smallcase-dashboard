@@ -679,23 +679,64 @@ def render_master_dashboard():
 def _parse_rw_xls(file_bytes: bytes):
     """
     Parse R Wadiwala transaction statement.
-    Supports both HTML-disguised .xls files and real .xlsx/.xls files.
+    Supports HTML-disguised .xls and real .xlsx files.
+    Uses only stdlib html.parser + openpyxl (already a dependency) — no lxml/html5lib needed.
     Returns (scheme_name: str, holdings: list[dict], date_range: str).
     holdings dicts have keys: scrip_name, group, net_qty, avg_cost, invested.
     """
     import io as _io, re as _re
+    from html.parser import HTMLParser
+
+    class _TableParser(HTMLParser):
+        """Extract all HTML tables using Python stdlib — zero external deps."""
+        def __init__(self):
+            super().__init__()
+            self.tables: list = []
+            self._table: list = []
+            self._row: list = []
+            self._cell: list = []
+            self._in_cell = False
+
+        def handle_starttag(self, tag, attrs):
+            if tag == 'table':
+                self._table = []
+            elif tag == 'tr':
+                self._row = []
+            elif tag in ('td', 'th'):
+                self._cell = []
+                self._in_cell = True
+
+        def handle_endtag(self, tag):
+            if tag in ('td', 'th'):
+                self._row.append(''.join(self._cell).strip())
+                self._in_cell = False
+            elif tag == 'tr' and self._row:
+                self._table.append(self._row[:])
+                self._row = []
+            elif tag == 'table' and self._table:
+                self.tables.append(self._table[:])
+                self._table = []
+
+        def handle_data(self, data):
+            if self._in_cell:
+                self._cell.append(data)
 
     df = None
 
-    # Strategy 1 — HTML-formatted XLS (R Wadiwala sends these for some portfolios)
+    # Strategy 1 — HTML-formatted XLS (stdlib html.parser, no external deps)
     try:
-        tables = pd.read_html(_io.BytesIO(file_bytes), flavor='html5lib')
-        if tables:
-            df = tables[0]
+        text = file_bytes.decode('utf-8', errors='replace')
+        parser = _TableParser()
+        parser.feed(text)
+        if parser.tables:
+            raw = parser.tables[0]
+            max_cols = max((len(r) for r in raw), default=0)
+            padded = [r + [''] * (max_cols - len(r)) for r in raw]
+            df = pd.DataFrame(padded)
     except Exception:
         pass
 
-    # Strategy 2 — Real Excel file (.xlsx via openpyxl)
+    # Strategy 2 — Real Excel file (.xlsx via openpyxl, already in requirements)
     if df is None:
         try:
             df = pd.read_excel(_io.BytesIO(file_bytes), header=None, engine='openpyxl')
