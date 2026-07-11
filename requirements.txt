@@ -6,12 +6,9 @@ streamlit>=1.30.0
 numpy==1.26.4
 pandas==2.2.3
 scipy==1.13.1
-# Pinned to a pre-curl_cffi yfinance. Newer yfinance (>=0.2.52) ships a native
-# curl_cffi networking layer that segfaults (signal 11) on Streamlit Cloud.
-# 0.2.40 uses plain `requests` — no curl_cffi is installed, so the native
-# crash is impossible. Prices may be rate-limited by Yahoo (handled gracefully)
-# but the app never crashes.
-yfinance==0.2.40
+# yfinance removed entirely — it pulls native C-extensions (curl_cffi,
+# frozendict) that segfault on Streamlit Cloud. Prices are now fetched with
+# plain `requests` against Yahoo's public JSON endpoint (see finance.py).
 plotly>=5.18.0
 pyxirr>=0.9.0
 psycopg2-binary>=2.9.9

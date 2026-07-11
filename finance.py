@@ -1,18 +1,28 @@
-"""Financial data fetching and calculations."""
+"""Financial data fetching and calculations.
 
-import yfinance as yf
+Prices come from Yahoo Finance's public chart JSON endpoint via plain `requests`.
+We deliberately do NOT use the `yfinance` library: on Streamlit Cloud it pulls
+native C-extensions (curl_cffi, frozendict, …) that segfault (signal 11) under
+rate-limiting. Direct requests are pure-Python and simply fail gracefully.
+"""
+
 import pandas as pd
 import numpy as np
 from datetime import datetime, date, timedelta
-from functools import lru_cache
 import time
 import requests
 import streamlit as st
 
-# Cache for live prices (refreshed per session)
-_price_cache: dict[str, dict] = {}
-_cache_time: float = 0
 CACHE_TTL = 300  # 5 minutes
+
+# Browser-like headers reduce Yahoo's bot throttling (what curl_cffi did natively)
+_YHEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json,text/plain,*/*",
+}
 
 
 def _ensure_ns_suffix(ticker: str) -> str:
@@ -23,37 +33,111 @@ def _ensure_ns_suffix(ticker: str) -> str:
     return t
 
 
+def _yahoo_chart(symbol: str, params: dict) -> dict | None:
+    """Call Yahoo's chart endpoint and return result[0] dict, or None on failure.
+
+    Pure requests — never raises, never segfaults. Tries both Yahoo hosts.
+    """
+    for host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
+        try:
+            resp = requests.get(
+                f"https://{host}/v8/finance/chart/{symbol}",
+                params=params, headers=_YHEADERS, timeout=10,
+            )
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            result = (data.get("chart") or {}).get("result")
+            if result:
+                return result[0]
+        except Exception:
+            continue
+    return None
+
+
+def _empty_quote() -> dict:
+    return {"current_price": 0, "prev_close": 0, "today_change": 0, "pct_change": 0}
+
+
+def _yahoo_quote_direct(symbol: str) -> dict | None:
+    """Current quote for a fully-qualified symbol (e.g. RELIANCE.NS)."""
+    res = _yahoo_chart(symbol, {"range": "5d", "interval": "1d"})
+    if not res:
+        return None
+    meta = res.get("meta") or {}
+    current = meta.get("regularMarketPrice")
+    try:
+        current = float(current) if current is not None else 0.0
+    except (TypeError, ValueError):
+        return None
+    if current <= 0:
+        return None
+    prev = meta.get("chartPreviousClose") or meta.get("previousClose") or current
+    try:
+        prev = float(prev)
+    except (TypeError, ValueError):
+        prev = current
+    change = current - prev
+    pct = (change / prev * 100) if prev else 0.0
+    return {
+        "current_price": round(current, 2),
+        "prev_close": round(prev, 2),
+        "today_change": round(change, 2),
+        "pct_change": round(pct, 2),
+    }
+
+
+def _quote_with_fallback(ticker: str) -> dict:
+    """Try .NS first, then .BO (BSE) as fallback for SME / BSE-only stocks."""
+    base = ticker.strip().upper().replace(".NS", "").replace(".BO", "")
+    for suffix in (".NS", ".BO"):
+        q = _yahoo_quote_direct(base + suffix)
+        if q:
+            return q
+    return _empty_quote()
+
+
+# ── Live prices ─────────────────────────────────────────────────────────────
+
+def fetch_live_data(tickers: list[str]) -> dict[str, dict]:
+    """Fetch current price / prev close / change / % for a list of tickers."""
+    return _fetch_live_data_cached(tuple(sorted(set(tickers))))
+
+
+@st.cache_data(ttl=CACHE_TTL, show_spinner="Fetching live prices...")
+def _fetch_live_data_cached(tickers: tuple) -> dict[str, dict]:
+    """Cached live price fetch (per-symbol direct Yahoo calls, sequential)."""
+    result = {}
+    for t in tickers:
+        try:
+            result[t] = _quote_with_fallback(t)
+        except Exception:
+            result[t] = _empty_quote()
+    return result
+
+
+# ── Opening prices (for buy-date / execution-date pricing) ──────────────────
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_open_price(ticker: str, target_date: str) -> float | None:
-    """
-    Fetch the opening price of a stock on a specific date.
-    Tries NSE first, falls back to BSE for SME / BSE-only stocks.
-    If the date is a holiday/weekend, fetches the next trading day's open.
-    Returns None if data can't be fetched.
-    """
+    """Opening price on a date (or the next trading day). Tries NSE then BSE."""
     base = ticker.strip().upper().replace(".NS", "").replace(".BO", "")
     try:
         dt = datetime.strptime(target_date, "%Y-%m-%d").date()
     except Exception:
         return None
-    start = dt
-    end = dt + timedelta(days=7)
-
+    p1 = int(datetime(dt.year, dt.month, dt.day).timestamp())
+    p2 = p1 + 8 * 86400
     for suffix in (".NS", ".BO"):
+        res = _yahoo_chart(base + suffix,
+                           {"period1": p1, "period2": p2, "interval": "1d"})
+        if not res:
+            continue
         try:
-            data = yf.download(base + suffix, start=start.strftime("%Y-%m-%d"),
-                               end=end.strftime("%Y-%m-%d"),
-                               progress=False, auto_adjust=False)
-            if data.empty:
-                continue
-            if isinstance(data.columns, pd.MultiIndex):
-                data = data.droplevel("Ticker", axis=1)
-            data = data.dropna(subset=["Open"]) if "Open" in data.columns else data
-            if data.empty:
-                continue
-            val = float(data["Open"].iloc[0])
-            if val > 0 and not pd.isna(val):
-                return round(val, 2)
+            opens = res["indicators"]["quote"][0]["open"]
+            for o in opens:
+                if o is not None and float(o) > 0:
+                    return round(float(o), 2)
         except Exception:
             continue
     return None
@@ -61,219 +145,48 @@ def fetch_open_price(ticker: str, target_date: str) -> float | None:
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_open_prices_batch(tickers: list[str], target_date: str) -> dict[str, float | None]:
-    """Fetch opening prices for multiple tickers on a specific date."""
-    if not tickers:
-        return {}
-
-    ns_tickers = [_ensure_ns_suffix(t) for t in tickers]
-    ns_to_orig = dict(zip(ns_tickers, tickers))
-
-    try:
-        dt = datetime.strptime(target_date, "%Y-%m-%d").date()
-        start = dt
-        end = dt + timedelta(days=7)
-        data = yf.download(ns_tickers, start=start.strftime("%Y-%m-%d"),
-                          end=end.strftime("%Y-%m-%d"),
-                          progress=False, threads=False)
-        if data.empty:
-            return {t: None for t in tickers}
-
-        results = {}
-        for ns_t, orig_t in ns_to_orig.items():
-            try:
-                if isinstance(data.columns, pd.MultiIndex):
-                    if len(ns_tickers) == 1:
-                        df = data.droplevel("Ticker", axis=1)
-                    else:
-                        df = data.xs(ns_t, level="Ticker", axis=1)
-                else:
-                    df = data
-
-                if not df.empty:
-                    results[orig_t] = round(float(df["Open"].iloc[0]), 2)
-                else:
-                    results[orig_t] = None
-            except Exception:
-                results[orig_t] = None
-
-        return results
-    except Exception:
-        return {t: None for t in tickers}
-
-
-def fetch_live_data(tickers: list[str]) -> dict[str, dict]:
-    """Fetch current price, previous close, day change, and % change for a list of tickers."""
-    # Use Streamlit cache — converts list to tuple for hashability
-    return _fetch_live_data_cached(tuple(sorted(set(tickers))))
-
-
-def _quote_from_df(df) -> dict | None:
-    """Build a quote dict from a 2-day OHLC DataFrame. Returns None if empty/invalid."""
-    if df is None or df.empty or len(df) < 1:
-        return None
-    try:
-        current = float(df["Close"].iloc[-1])
-        if current <= 0 or pd.isna(current):
-            return None
-        prev = float(df["Close"].iloc[-2]) if len(df) >= 2 else current
-        change = current - prev
-        pct = (change / prev * 100) if prev != 0 else 0.0
-        return {
-            "current_price": round(current, 2),
-            "prev_close": round(prev, 2),
-            "today_change": round(change, 2),
-            "pct_change": round(pct, 2),
-        }
-    except Exception:
-        return None
-
-
-def _fetch_single_quote_with_fallback(ticker: str) -> dict:
-    """Try .NS first, then .BO (BSE) as fallback for SME / BSE-only stocks."""
-    base = ticker.strip().upper().replace(".NS", "").replace(".BO", "")
-    for suffix in (".NS", ".BO"):
-        try:
-            data = yf.download(base + suffix, period="5d",
-                               progress=False, auto_adjust=False)
-            if isinstance(data.columns, pd.MultiIndex):
-                data = data.droplevel("Ticker", axis=1)
-            q = _quote_from_df(data)
-            if q:
-                return q
-        except Exception:
-            continue
-    return _empty_quote()
-
-
-@st.cache_data(ttl=300, show_spinner="Fetching live prices...")  # Cache 5 min
-def _fetch_live_data_cached(tickers: tuple) -> dict[str, dict]:
-    """Cached live price fetch — only calls yfinance every 5 minutes.
-
-    Strategy: bulk-download all .NS tickers in one call, then individually
-    retry failed ones with .BO (BSE) suffix as fallback for SME/BSE-only stocks.
-    """
-    result = {}
-    ns_tickers = [_ensure_ns_suffix(t) for t in tickers]
-    raw_to_orig = dict(zip(ns_tickers, tickers))
-
-    try:
-        data = yf.download(list(ns_tickers), period="5d", progress=False,
-                           threads=False, auto_adjust=False)
-    except Exception:
-        data = None
-
-    failed = []
-    if data is not None and not data.empty:
-        for ns_t, orig_t in raw_to_orig.items():
-            try:
-                if isinstance(data.columns, pd.MultiIndex):
-                    if len(ns_tickers) == 1:
-                        df = data.droplevel("Ticker", axis=1)
-                    else:
-                        df = data.xs(ns_t, level="Ticker", axis=1)
-                else:
-                    df = data
-
-                # Drop rows where close is NaN (these tickers had no data)
-                df = df.dropna(subset=["Close"]) if "Close" in df.columns else df
-                q = _quote_from_df(df)
-                if q:
-                    result[orig_t] = q
-                else:
-                    failed.append(orig_t)
-            except Exception:
-                failed.append(orig_t)
-    else:
-        # Bulk download returned nothing — almost always Yahoo rate-limiting or
-        # an outage. Do NOT hammer Yahoo with per-ticker retries (that can be
-        # 100+ sequential requests and make the app hang or get killed). Return
-        # empty quotes so the dashboard still renders.
-        return {t: _empty_quote() for t in tickers}
-
-    # Retry only a few stragglers individually with the .BO (BSE) fallback.
-    # If many failed at once, it's a systemic issue (rate-limit) — skip the
-    # retries to keep the app fast and stable rather than hammering Yahoo.
-    if len(failed) <= max(3, len(tickers) // 5):
-        for orig_t in failed:
-            result[orig_t] = _fetch_single_quote_with_fallback(orig_t)
-    else:
-        for orig_t in failed:
-            result[orig_t] = _empty_quote()
-
-    return result
-
-
-def _empty_quote() -> dict:
-    return {"current_price": 0, "prev_close": 0, "today_change": 0, "pct_change": 0}
-
-
-def fetch_stock_info(ticker: str) -> dict:
-    """Fetch beta, dividend yield, sector, industry for a ticker."""
-    return _fetch_stock_info_cached(ticker)
-
-
-@st.cache_data(ttl=3600, show_spinner=False)  # Cache for 1 hour
-def _fetch_stock_info_cached(ticker: str) -> dict:
-    """Cached version - avoids repeated yfinance calls."""
-    ns = _ensure_ns_suffix(ticker)
-    try:
-        info = yf.Ticker(ns).info
-        return {
-            "beta": info.get("beta", None),
-            "dividend_yield": info.get("dividendYield", 0) or 0,
-            "sector": info.get("sector", ""),
-            "industry": info.get("industry", ""),
-            "long_name": info.get("longName", ticker),
-        }
-    except Exception:
-        return {"beta": None, "dividend_yield": 0, "sector": "", "industry": "", "long_name": ticker}
-
-
-def fetch_stock_info_batch(tickers: list[str]) -> dict[str, dict]:
-    """Fetch info for multiple tickers (each individually cached)."""
-    results = {}
-    for t in tickers:
-        results[t] = _fetch_stock_info_cached(t)
-    return results
+    """Opening prices for multiple tickers on a specific date."""
+    return {t: fetch_open_price(t, target_date) for t in (tickers or [])}
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_opening_price(ticker: str, date_str: str) -> float | None:
-    """Fetch the opening price for a ticker on a specific date."""
-    ns = _ensure_ns_suffix(ticker)
-    try:
-        dt = datetime.strptime(date_str, "%Y-%m-%d").date()
-        # Fetch a few days around the target date to handle holidays
-        start = dt - timedelta(days=3)
-        end = dt + timedelta(days=3)
-        data = yf.download(ns, start=start.strftime("%Y-%m-%d"),
-                           end=end.strftime("%Y-%m-%d"), progress=False)
-        if data.empty:
-            return None
-        # Handle MultiIndex
-        if isinstance(data.columns, pd.MultiIndex):
-            data = data.droplevel("Ticker", axis=1)
-        # Find the exact date or the next available trading day
-        data.index = pd.to_datetime(data.index).date
-        if dt in data.index:
-            return round(float(data.loc[dt, "Open"]), 2)
-        # Find next trading day after target date
-        future = data[data.index >= dt]
-        if not future.empty:
-            return round(float(future.iloc[0]["Open"]), 2)
-        return None
-    except Exception:
-        return None
+    """Alias kept for compatibility — opening price on/after a date."""
+    return fetch_open_price(ticker, date_str)
 
 
 @st.cache_data(ttl=3600, show_spinner="Fetching opening prices...")
 def fetch_opening_prices_batch(tickers: tuple, date_str: str) -> dict[str, float | None]:
-    """Fetch opening prices for multiple tickers on a specific date."""
-    result = {}
-    for t in tickers:
-        result[t] = fetch_opening_price(t, date_str)
-    return result
+    """Opening prices for multiple tickers on a specific date."""
+    return {t: fetch_open_price(t, date_str) for t in tickers}
 
+
+# ── Stock metadata ──────────────────────────────────────────────────────────
+
+def fetch_stock_info(ticker: str) -> dict:
+    """Fetch name (and, if available, sector/industry) for a ticker."""
+    return _fetch_stock_info_cached(ticker)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_stock_info_cached(ticker: str) -> dict:
+    """Company name from Yahoo chart meta. Sector/industry/beta not available
+    via the public chart endpoint — returned empty (user can fill manually)."""
+    ns = _ensure_ns_suffix(ticker)
+    name = ticker
+    res = _yahoo_chart(ns, {"range": "1d", "interval": "1d"})
+    if res:
+        meta = res.get("meta") or {}
+        name = meta.get("longName") or meta.get("shortName") or ticker
+    return {"beta": None, "dividend_yield": 0, "sector": "", "industry": "", "long_name": name}
+
+
+def fetch_stock_info_batch(tickers: list[str]) -> dict[str, dict]:
+    """Fetch info for multiple tickers (each individually cached)."""
+    return {t: _fetch_stock_info_cached(t) for t in tickers}
+
+
+# ── Calculations ────────────────────────────────────────────────────────────
 
 def calculate_units(weightage: float, total_amount: float, buy_price: float) -> float:
     """Calculate number of units: (weightage% * total_amount) / buy_price."""
@@ -358,38 +271,45 @@ def calculate_xirr(buy_date_str: str, buy_price: float, units: float,
 def calculate_portfolio_volatility(tickers: list[str], weightages: list[float],
                                    period: str = "1y") -> float | None:
     """Calculate portfolio standard deviation (annualized) from daily returns."""
-    # Convert to tuples for caching
     return _calc_vol_cached(tuple(tickers), tuple(weightages), period)
 
 
-@st.cache_data(ttl=3600, show_spinner=False)  # Cache for 1 hour
+@st.cache_data(ttl=3600, show_spinner=False)
 def _calc_vol_cached(tickers: tuple, weightages: tuple, period: str) -> float | None:
     if not tickers:
         return None
 
-    ns_tickers = [_ensure_ns_suffix(t) for t in tickers]
+    # Fetch 1y daily closes per ticker via direct Yahoo requests
+    series = {}
+    for t in tickers:
+        res = _yahoo_chart(_ensure_ns_suffix(t), {"range": period, "interval": "1d"})
+        if not res:
+            continue
+        try:
+            closes = res["indicators"]["quote"][0]["close"]
+            ts = res.get("timestamp") or []
+            s = pd.Series(closes, index=pd.to_datetime(ts, unit="s")).dropna()
+            if not s.empty:
+                series[t] = s
+        except Exception:
+            continue
+
+    if not series:
+        return None
+
     try:
-        data = yf.download(ns_tickers, period=period, progress=False, threads=False)
-        if data.empty:
-            return None
-
-        closes = data["Close"]
-        if isinstance(closes, pd.DataFrame) and isinstance(closes.columns, pd.MultiIndex):
-            closes.columns = closes.columns.droplevel(0)
-        if isinstance(closes, pd.Series):
-            closes = closes.to_frame()
-
-        returns = closes.pct_change(fill_method=None).dropna()
+        closes_df = pd.DataFrame(series).dropna()
+        returns = closes_df.pct_change(fill_method=None).dropna()
         if returns.empty:
             return None
 
-        weights = np.array(list(weightages)[:len(returns.columns)]) / 100
+        weights = np.array(list(weightages)[:len(returns.columns)], dtype=float) / 100
         if weights.sum() > 0:
             weights = weights / weights.sum()
 
         cov_matrix = returns.cov() * 252
         port_var = np.dot(weights.T, np.dot(cov_matrix, weights))
-        return round(np.sqrt(port_var) * 100, 2)
+        return round(float(np.sqrt(port_var)) * 100, 2)
     except Exception:
         return None
 
