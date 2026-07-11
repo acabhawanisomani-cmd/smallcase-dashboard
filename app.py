@@ -22,6 +22,22 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# ── Database connectivity guard ─────────────────────────────────────────────
+# If the database could not be reached at startup, show the real error clearly
+# instead of letting the app crash to a blank "Oh no" page.
+if getattr(db, "INIT_ERROR", None):
+    st.error("🚨 Cannot connect to the database.")
+    st.markdown(
+        "The app started, but it could not reach your Neon PostgreSQL database. "
+        "Your data is safe in Neon — this is only a connection problem.\n\n"
+        "**Most likely fix:** the `DATABASE_URL` in **Streamlit → Settings → Secrets** "
+        "doesn't match your current Neon database. Copy the **pooled** connection string "
+        "from Neon's **Connect** dialog and paste it into the Streamlit secret."
+    )
+    st.markdown("**Exact error from the database driver:**")
+    st.code(db.INIT_ERROR, language="text")
+    st.stop()
+
 # ── Password Protection ────────────────────────────────────────────────────
 
 def check_password():

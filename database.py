@@ -771,4 +771,11 @@ def search_holdings(query: str) -> list[dict]:
     return rows
 
 
-init_db()
+# Run schema init at import time, but never let a database outage crash the
+# whole app on import (that produces an unhelpful "Oh no" page). If the DB is
+# unreachable, record the error so the UI can show it clearly instead.
+INIT_ERROR: str | None = None
+try:
+    init_db()
+except Exception as _e:
+    INIT_ERROR = f"{type(_e).__name__}: {_e}"
