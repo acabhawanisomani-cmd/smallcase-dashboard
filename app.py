@@ -695,14 +695,12 @@ def _parse_rw_xls(file_bytes: bytes):
     except Exception:
         pass
 
-    # Strategy 2 — Real Excel file (.xlsx via openpyxl, .xls via xlrd)
+    # Strategy 2 — Real Excel file (.xlsx via openpyxl)
     if df is None:
-        for engine in ('openpyxl', 'xlrd'):
-            try:
-                df = pd.read_excel(_io.BytesIO(file_bytes), header=None, engine=engine)
-                break
-            except Exception:
-                pass
+        try:
+            df = pd.read_excel(_io.BytesIO(file_bytes), header=None, engine='openpyxl')
+        except Exception:
+            pass
 
     if df is None or df.empty:
         raise ValueError(
