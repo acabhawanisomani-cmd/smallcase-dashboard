@@ -74,7 +74,7 @@ def fetch_open_prices_batch(tickers: list[str], target_date: str) -> dict[str, f
         end = dt + timedelta(days=7)
         data = yf.download(ns_tickers, start=start.strftime("%Y-%m-%d"),
                           end=end.strftime("%Y-%m-%d"),
-                          progress=False, threads=True)
+                          progress=False, threads=False)
         if data.empty:
             return {t: None for t in tickers}
 
@@ -158,7 +158,7 @@ def _fetch_live_data_cached(tickers: tuple) -> dict[str, dict]:
 
     try:
         data = yf.download(list(ns_tickers), period="5d", progress=False,
-                           threads=True, auto_adjust=False)
+                           threads=False, auto_adjust=False)
     except Exception:
         data = None
 
@@ -184,11 +184,21 @@ def _fetch_live_data_cached(tickers: tuple) -> dict[str, dict]:
             except Exception:
                 failed.append(orig_t)
     else:
-        failed = list(tickers)
+        # Bulk download returned nothing — almost always Yahoo rate-limiting or
+        # an outage. Do NOT hammer Yahoo with per-ticker retries (that can be
+        # 100+ sequential requests and make the app hang or get killed). Return
+        # empty quotes so the dashboard still renders.
+        return {t: _empty_quote() for t in tickers}
 
-    # Retry failed tickers with .BO fallback
-    for orig_t in failed:
-        result[orig_t] = _fetch_single_quote_with_fallback(orig_t)
+    # Retry only a few stragglers individually with the .BO (BSE) fallback.
+    # If many failed at once, it's a systemic issue (rate-limit) — skip the
+    # retries to keep the app fast and stable rather than hammering Yahoo.
+    if len(failed) <= max(3, len(tickers) // 5):
+        for orig_t in failed:
+            result[orig_t] = _fetch_single_quote_with_fallback(orig_t)
+    else:
+        for orig_t in failed:
+            result[orig_t] = _empty_quote()
 
     return result
 
@@ -359,7 +369,7 @@ def _calc_vol_cached(tickers: tuple, weightages: tuple, period: str) -> float | 
 
     ns_tickers = [_ensure_ns_suffix(t) for t in tickers]
     try:
-        data = yf.download(ns_tickers, period=period, progress=False, threads=True)
+        data = yf.download(ns_tickers, period=period, progress=False, threads=False)
         if data.empty:
             return None
 
