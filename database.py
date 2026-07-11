@@ -33,18 +33,24 @@ def get_connection():
         if "-pooler" not in db_url and ".neon.tech" in db_url:
             db_url = db_url.replace(".neon.tech", "-pooler.neon.tech")
 
-        for attempt in range(5):
+        # Short connect timeout + a few quick retries. Neon free-tier databases
+        # auto-suspend and take a few seconds to wake; we retry to give them time,
+        # but never hang so long that Streamlit Cloud kills the app on startup
+        # (a 120s hang exceeds the platform health-check window → "Oh no" crash).
+        last_err = None
+        for attempt in range(4):
             try:
-                conn = psycopg2.connect(db_url, connect_timeout=120,
+                conn = psycopg2.connect(db_url, connect_timeout=15,
                                         keepalives=1, keepalives_idle=30,
                                         keepalives_interval=10, keepalives_count=5)
                 conn.autocommit = False
                 return conn
             except Exception as e:
-                if attempt < 4:
-                    time.sleep(3 * (attempt + 1))  # 3s, 6s, 9s, 12s
+                last_err = e
+                if attempt < 3:
+                    time.sleep(2 * (attempt + 1))  # 2s, 4s, 6s
                 else:
-                    raise e
+                    raise last_err
     else:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
