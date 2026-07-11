@@ -689,7 +689,7 @@ def _parse_rw_xls(file_bytes: bytes):
 
     # Strategy 1 — HTML-formatted XLS (R Wadiwala sends these for some portfolios)
     try:
-        tables = pd.read_html(_io.BytesIO(file_bytes), flavor='lxml')
+        tables = pd.read_html(_io.BytesIO(file_bytes), flavor='html5lib')
         if tables:
             df = tables[0]
     except Exception:
