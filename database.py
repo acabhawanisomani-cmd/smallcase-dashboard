@@ -27,11 +27,12 @@ DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "smallcase_da
 def get_connection():
     if _USE_PG:
         import time
-        # Use pooled endpoint (-pooler) for reliable cross-region connections
+        # Use the connection string exactly as provided in Streamlit secrets.
+        # Enable "Connection pooling" in Neon's Connect dialog and paste that
+        # pooled URL directly into DATABASE_URL. We deliberately do NOT rewrite
+        # the host here — the old rewrite could produce an invalid hostname
+        # (e.g. ...aws-pooler.neon.tech) that hangs until the connect timeout.
         db_url = _DATABASE_URL
-        # Auto-convert to pooled endpoint if not already
-        if "-pooler" not in db_url and ".neon.tech" in db_url:
-            db_url = db_url.replace(".neon.tech", "-pooler.neon.tech")
 
         # Short connect timeout + a few quick retries. Neon free-tier databases
         # auto-suspend and take a few seconds to wake; we retry to give them time,
