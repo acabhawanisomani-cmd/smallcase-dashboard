@@ -6,7 +6,10 @@ streamlit>=1.30.0
 numpy==1.26.4
 pandas==2.2.3
 scipy==1.13.1
-yfinance>=0.2.30
+# Pinned: the newest yfinance ships a native curl_cffi networking layer that
+# segfaults (signal 11) on Streamlit Cloud during price fetching. This stable
+# release pulls a known-good curl_cffi and does not crash.
+yfinance==0.2.54
 plotly>=5.18.0
 pyxirr>=0.9.0
 psycopg2-binary>=2.9.9
