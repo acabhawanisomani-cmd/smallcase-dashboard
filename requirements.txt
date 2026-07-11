@@ -1,9 +1,13 @@
+# Pinned scientific stack — a mutually compatible, pre-numpy-2 set that is
+# rock-solid on Python 3.12. Leaving these unpinned lets a fresh rebuild pull
+# numpy 2.x + latest pandas, whose binaries are incompatible and segfault
+# (signal 11) when pandas builds a DataFrame. Do not loosen without testing.
 streamlit>=1.30.0
-pandas>=2.0.0
-numpy>=1.24.0
+numpy==1.26.4
+pandas==2.2.3
+scipy==1.13.1
 yfinance>=0.2.30
 plotly>=5.18.0
-scipy>=1.11.0
 pyxirr>=0.9.0
 psycopg2-binary>=2.9.9
 openpyxl>=3.1.0
