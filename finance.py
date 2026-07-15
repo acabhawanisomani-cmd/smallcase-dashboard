@@ -65,18 +65,33 @@ def _yahoo_quote_direct(symbol: str) -> dict | None:
     if not res:
         return None
     meta = res.get("meta") or {}
+
+    # Daily closes over the window; None entries are non-trading gaps.
+    closes: list[float] = []
+    try:
+        for c in res["indicators"]["quote"][0]["close"]:
+            if c is not None:
+                closes.append(float(c))
+    except Exception:
+        closes = []
+
     current = meta.get("regularMarketPrice")
     try:
         current = float(current) if current is not None else 0.0
     except (TypeError, ValueError):
-        return None
+        current = 0.0
+    if current <= 0:
+        current = closes[-1] if closes else 0.0
     if current <= 0:
         return None
-    prev = meta.get("chartPreviousClose") or meta.get("previousClose") or current
-    try:
-        prev = float(prev)
-    except (TypeError, ValueError):
-        prev = current
+
+    # Previous close = the PRIOR TRADING DAY's close, i.e. the second-to-last
+    # entry of the daily series (the last entry is today's session).
+    # Do NOT use meta["chartPreviousClose"]: with range=5d that is the close
+    # from *before the whole window* (~a week back), which makes a 5-day move
+    # show up as today's % change.
+    prev = closes[-2] if len(closes) >= 2 else current
+
     change = current - prev
     pct = (change / prev * 100) if prev else 0.0
     return {
