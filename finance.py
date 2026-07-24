@@ -60,37 +60,54 @@ def _empty_quote() -> dict:
 
 
 def _yahoo_quote_direct(symbol: str) -> dict | None:
-    """Current quote for a fully-qualified symbol (e.g. RELIANCE.NS)."""
-    res = _yahoo_chart(symbol, {"range": "5d", "interval": "1d"})
+    """Current quote for a fully-qualified symbol (e.g. RELIANCE.NS).
+
+    Uses range=1d: with a single-day window Yahoo's meta.chartPreviousClose is
+    exactly the PRIOR TRADING DAY's close — the correct reference for daily %
+    change. (With a longer range it becomes the close before the whole window,
+    ~a week back, which wrongly reports a multi-day move as today's change.)
+    It is also more reliable than the daily close series, which can have None
+    gaps on individual days.
+    """
+    res = _yahoo_chart(symbol, {"range": "1d", "interval": "1d"})
     if not res:
         return None
     meta = res.get("meta") or {}
 
-    # Daily closes over the window; None entries are non-trading gaps.
-    closes: list[float] = []
-    try:
-        for c in res["indicators"]["quote"][0]["close"]:
-            if c is not None:
-                closes.append(float(c))
-    except Exception:
-        closes = []
-
+    # Current price
     current = meta.get("regularMarketPrice")
     try:
         current = float(current) if current is not None else 0.0
     except (TypeError, ValueError):
         current = 0.0
-    if current <= 0:
-        current = closes[-1] if closes else 0.0
+
+    # Previous (prior trading day) close
+    prev = meta.get("previousClose")
+    if prev is None:
+        prev = meta.get("chartPreviousClose")
+    try:
+        prev = float(prev) if prev is not None else 0.0
+    except (TypeError, ValueError):
+        prev = 0.0
+
+    # Fallback to the close series only if meta is incomplete
+    if current <= 0 or prev <= 0:
+        closes: list[float] = []
+        try:
+            for c in res["indicators"]["quote"][0]["close"]:
+                if c is not None:
+                    closes.append(float(c))
+        except Exception:
+            closes = []
+        if current <= 0 and closes:
+            current = closes[-1]
+        if prev <= 0 and len(closes) >= 2:
+            prev = closes[-2]
+
     if current <= 0:
         return None
-
-    # Previous close = the PRIOR TRADING DAY's close, i.e. the second-to-last
-    # entry of the daily series (the last entry is today's session).
-    # Do NOT use meta["chartPreviousClose"]: with range=5d that is the close
-    # from *before the whole window* (~a week back), which makes a 5-day move
-    # show up as today's % change.
-    prev = closes[-2] if len(closes) >= 2 else current
+    if prev <= 0:
+        prev = current
 
     change = current - prev
     pct = (change / prev * 100) if prev else 0.0
