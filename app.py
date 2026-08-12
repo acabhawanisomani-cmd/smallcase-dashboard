@@ -1101,8 +1101,8 @@ def _parse_rw_xls(file_bytes: bytes):
 
 
 def _render_rw_import(sc: dict, sc_id: int, total_amount: float):
-    """Render the R Wadiwala transaction statement import section."""
-    with st.expander("📋 Import R Wadiwala Transaction Statement", expanded=False):
+    """Render the R Wadiwala transaction statement import panel."""
+    with st.container(border=True):
         st.markdown(
             "Upload the **Transaction Statement (.xls)** received from R Wadiwala. "
             "The system will calculate current holdings (net quantity & weighted avg cost) "
@@ -1394,485 +1394,155 @@ def render_smallcase(sc: dict):
 
     total_amount = new_amount
 
-    # ── R Wadiwala: Transaction Statement Import ────────────────────────────
-    if (sc.get("group_name") or "").strip().lower() == "r wadiwala":
+    # ── Action bar ──────────────────────────────────────────────────────────
+    # Compact toggle buttons instead of full-width expanders; the selected
+    # panel renders below. Clicking an active button closes it again.
+    is_rw = (sc.get("group_name") or "").strip().lower() == "r wadiwala"
+    panel_key = f"panel_{sc_id}"
+    active_panel = st.session_state.get(panel_key)
+
+    def _panel_button(label: str, name: str, col, help_text: str):
+        with col:
+            if st.button(
+                label, key=f"btn_{name}_{sc_id}", use_container_width=True,
+                type="primary" if active_panel == name else "secondary",
+                help=help_text,
+            ):
+                st.session_state[panel_key] = None if active_panel == name else name
+                st.rerun()
+
+    btn_cols = st.columns(4)
+    i = 0
+    if is_rw:
+        _panel_button("📋 Import Statement", "rw", btn_cols[i],
+                      "Upload the R Wadiwala transaction statement to rebuild holdings")
+        i += 1
+    _panel_button("➕ Add Stock", "add", btn_cols[i],
+                  "Add a new holding to this folio")
+
+    if is_rw and active_panel == "rw":
         _render_rw_import(sc, sc_id, total_amount)
 
     # ── Add Stock Form ──────────────────────────────────────────────────────
-    with st.expander("➕ Add Stock", expanded=False):
-        # Step 1: Ticker lookup (outside form for instant feedback)
-        lookup_key = f"lookup_{sc_id}"
-        lc1, lc2 = st.columns([3, 1])
-        with lc1:
-            ticker_input = st.text_input("Ticker (e.g., RELIANCE, TCS)", key=f"ticker_inp_{sc_id}")
-        with lc2:
-            st.markdown("<br>", unsafe_allow_html=True)
-            lookup_clicked = st.button("🔍 Lookup", key=f"lookup_btn_{sc_id}")
+    if active_panel == "add":
+        with st.container(border=True):
+            # Step 1: Ticker lookup (outside form for instant feedback)
+            lookup_key = f"lookup_{sc_id}"
+            lc1, lc2 = st.columns([3, 1])
+            with lc1:
+                ticker_input = st.text_input("Ticker (e.g., RELIANCE, TCS)", key=f"ticker_inp_{sc_id}")
+            with lc2:
+                st.markdown("<br>", unsafe_allow_html=True)
+                lookup_clicked = st.button("🔍 Lookup", key=f"lookup_btn_{sc_id}")
 
-        # Fetch and cache stock info in session_state
-        if lookup_clicked and ticker_input:
-            with st.spinner(f"Fetching info for {ticker_input.upper()}..."):
-                info = fin.fetch_stock_info(ticker_input.strip())
-                st.session_state[lookup_key] = {
-                    "ticker": ticker_input.strip().upper(),
-                    "name": info.get("long_name", ticker_input.strip().upper()),
-                    "industry": info.get("industry", ""),
-                    "sector": info.get("sector", ""),
-                }
+            # Fetch and cache stock info in session_state
+            if lookup_clicked and ticker_input:
+                with st.spinner(f"Fetching info for {ticker_input.upper()}..."):
+                    info = fin.fetch_stock_info(ticker_input.strip())
+                    st.session_state[lookup_key] = {
+                        "ticker": ticker_input.strip().upper(),
+                        "name": info.get("long_name", ticker_input.strip().upper()),
+                        "industry": info.get("industry", ""),
+                        "sector": info.get("sector", ""),
+                    }
 
-        # Pre-fill defaults from lookup
-        looked_up = st.session_state.get(lookup_key, {})
-        default_name = looked_up.get("name", "")
-        default_industry = looked_up.get("industry", "")
-        if looked_up.get("sector") and default_industry:
-            default_industry = f"{looked_up['sector']} / {default_industry}"
-        elif looked_up.get("sector"):
-            default_industry = looked_up["sector"]
+            # Pre-fill defaults from lookup
+            looked_up = st.session_state.get(lookup_key, {})
+            default_name = looked_up.get("name", "")
+            default_industry = looked_up.get("industry", "")
+            if looked_up.get("sector") and default_industry:
+                default_industry = f"{looked_up['sector']} / {default_industry}"
+            elif looked_up.get("sector"):
+                default_industry = looked_up["sector"]
 
-        if looked_up:
-            st.success(f"Found: **{default_name}** — {default_industry}")
+            if looked_up:
+                st.success(f"Found: **{default_name}** — {default_industry}")
 
-        # Step 2: Date picker outside form for auto-price fetch
-        add_buy_date = st.date_input("Date of Buy (open price auto-fetched)",
-                                      value=date.today(), key=f"add_date_{sc_id}")
-        add_date_str = add_buy_date.strftime("%Y-%m-%d")
+            # Step 2: Date picker outside form for auto-price fetch
+            add_buy_date = st.date_input("Date of Buy (open price auto-fetched)",
+                                          value=date.today(), key=f"add_date_{sc_id}")
+            add_date_str = add_buy_date.strftime("%Y-%m-%d")
 
-        # Auto-fetch opening price if we have a ticker
-        add_fetched_price = 0.0
-        add_liq_fetched = 0.0
-        if looked_up.get("ticker"):
-            add_fetched_price = fin.fetch_open_price(looked_up["ticker"], add_date_str) or 0.0
-            add_liq_fetched = fin.fetch_open_price(db.RESIDUAL_TICKER, add_date_str) or 0.0
-            if add_fetched_price > 0:
-                st.success(f"📈 Opening price of **{looked_up['ticker']}** on **{add_date_str}**: **₹{add_fetched_price:,.2f}**")
-            else:
-                st.warning(f"Could not fetch price for {looked_up['ticker']} on {add_date_str}. Enter manually.")
-
-        # Step 3: Form with pre-filled values
-        with st.form(f"add_stock_{sc_id}"):
-            c1, c2 = st.columns(2)
-            with c1:
-                scrip_name = st.text_input("Scrip Name", value=default_name)
-                industry = st.text_input("Industry / Sector", value=default_industry)
-                weightage = st.number_input("Target Weightage %", 0.0, 100.0, 5.0, 0.5)
-            with c2:
-                buy_price = st.number_input("Buy Price (₹)", 0.0, step=0.5,
-                                             value=float(add_fetched_price),
-                                             help="Auto-filled with opening price. Override if needed.")
-                auto_calc = st.checkbox("Auto-calculate Units from Weightage", value=True)
-                if not auto_calc:
-                    manual_units = st.number_input("Manual Units", 0.0, step=1.0)
-
-            sl_col1, sl_col2 = st.columns(2)
-            with sl_col1:
-                stop_loss_add = st.number_input(
-                    "Stop Loss (₹) — optional",
-                    min_value=0.0, step=0.5, value=0.0,
-                    help="Row turns red on the dashboard if current price falls to or below this level. Leave 0 to skip."
-                )
-            with sl_col2:
-                liq_exit_price = st.number_input(
-                    "LIQUIDCASE exit price (₹) — auto-fetched",
-                    min_value=0.0, step=0.1,
-                    value=float(add_liq_fetched),
-                    key=f"add_liq_ep_{sc_id}",
-                    help="Auto-filled with LIQUIDCASE opening price on same date. Override if needed."
-                )
-
-            add_submitted = st.form_submit_button("Add Stock")
-            if add_submitted and ticker_input:
-                ticker_clean = ticker_input.strip().upper()
-                if auto_calc:
-                    price_for_calc = buy_price if buy_price > 0 else 1
-                    units = fin.calculate_units(weightage, total_amount, price_for_calc)
+            # Auto-fetch opening price if we have a ticker
+            add_fetched_price = 0.0
+            add_liq_fetched = 0.0
+            if looked_up.get("ticker"):
+                add_fetched_price = fin.fetch_open_price(looked_up["ticker"], add_date_str) or 0.0
+                add_liq_fetched = fin.fetch_open_price(db.RESIDUAL_TICKER, add_date_str) or 0.0
+                if add_fetched_price > 0:
+                    st.success(f"📈 Opening price of **{looked_up['ticker']}** on **{add_date_str}**: **₹{add_fetched_price:,.2f}**")
                 else:
-                    units = manual_units
+                    st.warning(f"Could not fetch price for {looked_up['ticker']} on {add_date_str}. Enter manually.")
 
-                db.add_holding(
-                    smallcase_id=sc_id,
-                    ticker=ticker_clean,
-                    scrip_name=scrip_name if scrip_name else ticker_clean,
-                    industry=industry,
-                    weightage=weightage,
-                    buy_price=buy_price,
-                    buy_date=add_date_str,
-                    units=units,
-                    stop_loss=stop_loss_add,
-                )
+            # Step 3: Form with pre-filled values
+            with st.form(f"add_stock_{sc_id}"):
+                c1, c2 = st.columns(2)
+                with c1:
+                    scrip_name = st.text_input("Scrip Name", value=default_name)
+                    industry = st.text_input("Industry / Sector", value=default_industry)
+                    weightage = st.number_input("Target Weightage %", 0.0, 100.0, 5.0, 0.5)
+                with c2:
+                    buy_price = st.number_input("Buy Price (₹)", 0.0, step=0.5,
+                                                 value=float(add_fetched_price),
+                                                 help="Auto-filled with opening price. Override if needed.")
+                    auto_calc = st.checkbox("Auto-calculate Units from Weightage", value=True)
+                    if not auto_calc:
+                        manual_units = st.number_input("Manual Units", 0.0, step=1.0)
 
-                # Auto-rebalance LIQUIDCASE
-                if ticker_clean != db.RESIDUAL_TICKER:
-                    rb = db.rebalance_residual(sc_id, total_amount,
-                                               exit_price=liq_exit_price if liq_exit_price > 0 else None)
-                    if rb:
-                        st.info(f"🔄 LIQUIDCASE auto-adjusted: {rb['old_wt']:.1f}% → {rb['new_wt']:.1f}% "
-                                f"({rb['delta_units']:+.2f} units)")
-
-                # Clear lookup cache
-                st.session_state.pop(lookup_key, None)
-                st.success(f"Added {ticker_clean} — {units} units")
-                st.rerun()
-
-    # ── CSV Upload & Rebalance ─────────────────────────────────────────────
-    with st.expander("📤 Upload CSV to Rebalance", expanded=False):
-        st.markdown("Upload your smallcase CSV to automatically rebalance the portfolio. "
-                     "Format: `NSE Ticker, Weight, Segment (optional), Rationale (optional)`")
-        st.markdown("> **How it works:** The system uses the **current portfolio market value** "
-                     "as the rebalance base (just like the actual smallcase platform). "
-                     "Buy/Sell happens at the opening price of the execution date.")
-
-        uploaded_file = st.file_uploader("Upload CSV", type=["csv"], key=f"csv_{sc_id}")
-
-        if uploaded_file:
-            try:
-                csv_df = pd.read_csv(uploaded_file)
-                # Normalize column names
-                col_map = {}
-                for c in csv_df.columns:
-                    cl = c.strip().lower()
-                    if "ticker" in cl:
-                        col_map[c] = "ticker"
-                    elif "weight" in cl:
-                        col_map[c] = "weight"
-                    elif "segment" in cl or "sector" in cl:
-                        col_map[c] = "segment"
-                    elif "rationale" in cl:
-                        col_map[c] = "rationale"
-                csv_df = csv_df.rename(columns=col_map)
-
-                if "ticker" not in csv_df.columns or "weight" not in csv_df.columns:
-                    st.error("CSV must have 'NSE Ticker' and 'Weight' columns.")
-                else:
-                    csv_df["ticker"] = csv_df["ticker"].str.strip().str.upper()
-                    csv_df["weight"] = pd.to_numeric(csv_df["weight"], errors="coerce").fillna(0)
-
-                    # Get current holdings and compute current market value
-                    curr_holdings = db.get_holdings(sc_id)
-                    curr_map = {}
-                    current_market_value = 0.0
-                    if not curr_holdings.empty:
-                        # Build table to get live market values
-                        _temp_table = build_holdings_table(curr_holdings, total_amount)
-                        if not _temp_table.empty:
-                            current_market_value = round(_temp_table["Market Value"].sum(), 2)
-
-                        for _, h in curr_holdings.iterrows():
-                            # Get live price from temp table
-                            live_row = _temp_table[_temp_table["Ticker"] == h["ticker"]] if not _temp_table.empty else pd.DataFrame()
-                            live_price = float(live_row["Current Price"].iloc[0]) if not live_row.empty else h["buy_price"]
-
-                            curr_map[h["ticker"]] = {
-                                "id": h["id"], "weight": h["weightage"],
-                                "units": h["units"], "buy_price": h["buy_price"],
-                                "scrip_name": h["scrip_name"], "industry": h["industry"],
-                                "buy_date": h["buy_date"],
-                                "current_price": live_price,
-                                "market_value": h["units"] * live_price,
-                            }
-
-                    # Show rebalance base amount
-                    st.markdown("### 💰 Rebalance Base Amount")
-                    st.markdown("All new unit calculations will be based on this amount. "
-                                "**Default = your Total Investable Amount.** Override only if "
-                                "the smallcase platform shows a different value (e.g., after market movement).")
-
-                    # Default to Total Investable Amount (not market value)
-                    # because market value can be stale if existing units are wrong
-                    default_base = total_amount if total_amount > 0 else current_market_value
-
-                    rb_c1, rb_c2 = st.columns([2, 1])
-                    with rb_c1:
-                        rebalance_base = st.number_input(
-                            "Rebalance Base Amount (₹)",
-                            value=float(default_base),
-                            min_value=0.0, step=100.0,
-                            key=f"rebal_base_{sc_id}",
-                            help="Defaults to Total Investable Amount. Override if smallcase platform shows a different value."
-                        )
-                    with rb_c2:
-                        st.metric("Set Investable Amount", f"₹{total_amount:,.2f}")
-                        st.metric("Current Market Value", f"₹{current_market_value:,.2f}")
-
-                    csv_map = {}
-                    for _, r in csv_df.iterrows():
-                        csv_map[r["ticker"]] = {
-                            "weight": round(r["weight"], 2),
-                            "segment": r.get("segment", ""),
-                        }
-
-                    # Build diff table
-                    all_tickers = sorted(set(list(curr_map.keys()) + list(csv_map.keys())))
-                    diff_rows = []
-                    for t in all_tickers:
-                        old_wt = curr_map.get(t, {}).get("weight", 0)
-                        new_wt = csv_map.get(t, {}).get("weight", 0)
-                        change = round(new_wt - old_wt, 2)
-
-                        if t not in curr_map and new_wt > 0:
-                            action = "NEW BUY"
-                        elif t not in csv_map or new_wt == 0:
-                            action = "EXIT"
-                        elif change > 0.01:
-                            action = "ADD MORE"
-                        elif change < -0.01:
-                            action = "REDUCE"
-                        else:
-                            action = "NO CHANGE"
-
-                        # Calculate expected units based on rebalance base
-                        old_units = curr_map.get(t, {}).get("units", 0)
-                        old_mkt_val = curr_map.get(t, {}).get("market_value", 0)
-
-                        diff_rows.append({
-                            "Ticker": t,
-                            "Current Wt%": old_wt,
-                            "New Wt%": new_wt,
-                            "Change": change,
-                            "Action": action,
-                            "Current Units": round(old_units, 2),
-                            "Current Value": round(old_mkt_val, 0),
-                            "Target Value": round(new_wt / 100 * rebalance_base, 0),
-                        })
-
-                    diff_df = pd.DataFrame(diff_rows)
-
-                    # Show diff with color coding
-                    st.markdown("### Rebalance Preview")
-
-                    def color_action(val):
-                        colors = {
-                            "NEW BUY": "color: #00e676; font-weight: bold",
-                            "ADD MORE": "color: #69f0ae",
-                            "REDUCE": "color: #ffca28",
-                            "EXIT": "color: #ff5252; font-weight: bold",
-                            "NO CHANGE": "color: #888",
-                        }
-                        return colors.get(val, "")
-
-                    st.dataframe(
-                        diff_df.style
-                            .map(color_action, subset=["Action"])
-                            .map(color_pnl, subset=["Change"])
-                            .format({
-                                "Current Wt%": "{:.1f}%", "New Wt%": "{:.1f}%", "Change": "{:+.1f}%",
-                                "Current Units": "{:.2f}", "Current Value": "₹{:,.0f}", "Target Value": "₹{:,.0f}",
-                            }),
-                        width="stretch", hide_index=True,
+                sl_col1, sl_col2 = st.columns(2)
+                with sl_col1:
+                    stop_loss_add = st.number_input(
+                        "Stop Loss (₹) — optional",
+                        min_value=0.0, step=0.5, value=0.0,
+                        help="Row turns red on the dashboard if current price falls to or below this level. Leave 0 to skip."
+                    )
+                with sl_col2:
+                    liq_exit_price = st.number_input(
+                        "LIQUIDCASE exit price (₹) — auto-fetched",
+                        min_value=0.0, step=0.1,
+                        value=float(add_liq_fetched),
+                        key=f"add_liq_ep_{sc_id}",
+                        help="Auto-filled with LIQUIDCASE opening price on same date. Override if needed."
                     )
 
-                    changes = diff_df[diff_df["Action"] != "NO CHANGE"]
-                    if changes.empty:
-                        st.success("Portfolio already matches the CSV. No changes needed.")
+                add_submitted = st.form_submit_button("Add Stock")
+                if add_submitted and ticker_input:
+                    ticker_clean = ticker_input.strip().upper()
+                    if auto_calc:
+                        price_for_calc = buy_price if buy_price > 0 else 1
+                        units = fin.calculate_units(weightage, total_amount, price_for_calc)
                     else:
-                        st.markdown("---")
-                        st.markdown("**Execution Settings**")
-                        st.markdown("> Buy/Sell prices = **opening price of the execution date** (next trading day).")
+                        units = manual_units
 
-                        exec_date = st.date_input(
-                            "Execution Date (next trading day)",
-                            value=date.today(),
-                            key=f"exec_date_{sc_id}",
-                        )
-                        exec_date_str = exec_date.strftime("%Y-%m-%d")
+                    db.add_holding(
+                        smallcase_id=sc_id,
+                        ticker=ticker_clean,
+                        scrip_name=scrip_name if scrip_name else ticker_clean,
+                        industry=industry,
+                        weightage=weightage,
+                        buy_price=buy_price,
+                        buy_date=add_date_str,
+                        units=units,
+                        stop_loss=stop_loss_add,
+                    )
 
-                        # Option to auto-fetch or manual prices
-                        price_mode = st.radio(
-                            "Price Mode",
-                            ["Auto-fetch opening prices", "I'll enter prices manually"],
-                            key=f"price_mode_{sc_id}",
-                        )
+                    # Auto-rebalance LIQUIDCASE
+                    if ticker_clean != db.RESIDUAL_TICKER:
+                        rb = db.rebalance_residual(sc_id, total_amount,
+                                                   exit_price=liq_exit_price if liq_exit_price > 0 else None)
+                        if rb:
+                            st.info(f"🔄 LIQUIDCASE auto-adjusted: {rb['old_wt']:.1f}% → {rb['new_wt']:.1f}% "
+                                    f"({rb['delta_units']:+.2f} units)")
 
-                        fetched_prices = {}
-                        if price_mode == "Auto-fetch opening prices":
-                            action_tickers = changes["Ticker"].tolist()
-                            if st.button("Fetch Opening Prices", key=f"fetch_op_{sc_id}"):
-                                with st.spinner("Fetching opening prices..."):
-                                    fetched_prices = fin.fetch_opening_prices_batch(
-                                        tuple(action_tickers), exec_date_str
-                                    )
-                                    st.session_state[f"fetched_prices_{sc_id}"] = fetched_prices
-
-                            fetched_prices = st.session_state.get(f"fetched_prices_{sc_id}", {})
-                            if fetched_prices:
-                                price_df = pd.DataFrame([
-                                    {"Ticker": t, "Opening Price": f"₹{p:,.2f}" if p else "N/A"}
-                                    for t, p in fetched_prices.items()
-                                ])
-                                st.dataframe(price_df, width="stretch", hide_index=True)
-
-                                missing = [t for t, p in fetched_prices.items() if p is None]
-                                if missing:
-                                    st.warning(f"Could not fetch prices for: {', '.join(missing)}. "
-                                              f"Enter manually below or try a different date.")
-
-                        # Manual price overrides
-                        manual_prices = {}
-                        need_manual = []
-                        for _, row in changes.iterrows():
-                            t = row["Ticker"]
-                            fp = fetched_prices.get(t)
-                            if price_mode == "I'll enter prices manually" or fp is None:
-                                need_manual.append(t)
-
-                        if need_manual:
-                            st.markdown("**Enter prices manually:**")
-                            cols = st.columns(min(3, len(need_manual)))
-                            for i, t in enumerate(need_manual):
-                                with cols[i % len(cols)]:
-                                    manual_prices[t] = st.number_input(
-                                        f"{t} price (₹)", 0.0, step=0.5,
-                                        key=f"mp_{sc_id}_{t}",
-                                    )
-
-                        # Merge prices: fetched + manual overrides
-                        final_prices = {**fetched_prices, **{t: p for t, p in manual_prices.items() if p > 0}}
-
-                        # Apply button
-                        all_priced = all(final_prices.get(row["Ticker"]) and final_prices[row["Ticker"]] > 0
-                                         for _, row in changes.iterrows())
-
-                        if all_priced:
-                            # Show what will happen with exact unit calculations
-                            st.markdown("### 📋 Execution Summary")
-                            exec_rows = []
-                            for _, row in changes.iterrows():
-                                t = row["Ticker"]
-                                action = row["Action"]
-                                new_wt = row["New Wt%"]
-                                price = final_prices[t]
-                                target_value = new_wt / 100 * rebalance_base
-                                target_units = round(target_value / price, 4) if price > 0 else 0
-
-                                if action == "NEW BUY":
-                                    exec_rows.append({"Ticker": t, "Action": action,
-                                        "Units": f"+{target_units:.4f}", "Price": f"₹{price:,.2f}",
-                                        "Amount": f"₹{target_value:,.2f}"})
-                                elif action == "EXIT":
-                                    h = curr_map[t]
-                                    exec_rows.append({"Ticker": t, "Action": action,
-                                        "Units": f"-{h['units']:.4f}", "Price": f"₹{price:,.2f}",
-                                        "Amount": f"₹{h['units'] * price:,.2f}"})
-                                elif action == "ADD MORE":
-                                    h = curr_map[t]
-                                    add_units = round(target_units - h["units"], 4)
-                                    if add_units > 0:
-                                        exec_rows.append({"Ticker": t, "Action": f"BUY +{row['Change']:.1f}%",
-                                            "Units": f"+{add_units:.4f}", "Price": f"₹{price:,.2f}",
-                                            "Amount": f"₹{add_units * price:,.2f}"})
-                                    else:
-                                        exec_rows.append({"Ticker": t, "Action": f"SELL {row['Change']:.1f}%",
-                                            "Units": f"{add_units:.4f}", "Price": f"₹{price:,.2f}",
-                                            "Amount": f"₹{abs(add_units) * price:,.2f}"})
-                                elif action == "REDUCE":
-                                    h = curr_map[t]
-                                    sell_units = round(h["units"] - target_units, 4)
-                                    exec_rows.append({"Ticker": t, "Action": f"SELL {abs(row['Change']):.1f}%",
-                                        "Units": f"-{sell_units:.4f}", "Price": f"₹{price:,.2f}",
-                                        "Amount": f"₹{sell_units * price:,.2f}"})
-
-                            exec_df = pd.DataFrame(exec_rows)
-                            st.dataframe(exec_df.style.map(color_action, subset=["Action"]),
-                                         width="stretch", hide_index=True)
-
-                            if st.button("✅ Apply Rebalance", key=f"apply_rebal_{sc_id}", type="primary"):
-                                applied = []
-                                for _, row in changes.iterrows():
-                                    t = row["Ticker"]
-                                    action = row["Action"]
-                                    new_wt = row["New Wt%"]
-                                    price = final_prices[t]
-
-                                    # Calculate target units based on rebalance base
-                                    target_value = new_wt / 100 * rebalance_base
-                                    target_units = round(target_value / price, 4) if price > 0 else 0
-
-                                    if action == "NEW BUY":
-                                        # Fetch stock info for name/industry
-                                        info = fin.fetch_stock_info(t)
-                                        segment = csv_map.get(t, {}).get("segment", "")
-                                        industry = segment if segment else (
-                                            f"{info['sector']} / {info['industry']}" if info["sector"] else info["industry"]
-                                        )
-                                        db.add_holding(
-                                            smallcase_id=sc_id,
-                                            ticker=t,
-                                            scrip_name=info.get("long_name", t),
-                                            industry=industry,
-                                            weightage=new_wt,
-                                            buy_price=price,
-                                            buy_date=exec_date_str,
-                                            units=target_units,
-                                        )
-                                        applied.append(f"BUY {t}: {new_wt}% @ ₹{price:,.2f} ({target_units:.4f} units)")
-
-                                    elif action == "EXIT":
-                                        h = curr_map[t]
-                                        db.exit_holding(h["id"], price, exec_date_str)
-                                        applied.append(f"EXIT {t}: sold {h['units']:.4f} units @ ₹{price:,.2f}")
-
-                                    elif action == "ADD MORE":
-                                        h = curr_map[t]
-                                        old_units = h["units"]
-                                        old_bp = h["buy_price"]
-                                        add_units = round(target_units - old_units, 4)
-
-                                        if add_units > 0:
-                                            # Buying more — average up/down
-                                            total_units = round(old_units + add_units, 4)
-                                            avg_price = round(
-                                                (old_units * old_bp + add_units * price) / total_units, 2
-                                            ) if total_units > 0 else price
-
-                                            db.update_holding(h["id"],
-                                                              weightage=new_wt,
-                                                              units=total_units,
-                                                              buy_price=avg_price)
-
-                                            db.log_transaction(h["id"], sc_id, t, 'BUY', add_units, price, exec_date_str)
-                                            applied.append(f"ADD {t}: +{add_units:.4f} units @ ₹{price:,.2f}, avg ₹{avg_price:,.2f}")
-                                        else:
-                                            # Actually need to sell (market moved, target units < current)
-                                            sell_units = abs(add_units)
-                                            new_total = round(old_units - sell_units, 4)
-                                            db.update_holding(h["id"],
-                                                              weightage=new_wt,
-                                                              units=new_total)
-                                            db.log_transaction(h["id"], sc_id, t, 'SELL', sell_units, price, exec_date_str)
-                                            applied.append(f"ADJUST {t}: sold {sell_units:.4f} units @ ₹{price:,.2f} (market value adjustment)")
-
-                                    elif action == "REDUCE":
-                                        h = curr_map[t]
-                                        old_units = h["units"]
-                                        sell_units = round(old_units - target_units, 4)
-                                        db.update_holding(h["id"], weightage=new_wt, units=target_units)
-                                        db.log_transaction(h["id"], sc_id, t, 'SELL', sell_units, price, exec_date_str)
-                                        applied.append(f"REDUCE {t}: {h['weight']}% → {new_wt}%, sold {sell_units:.4f} units @ ₹{price:,.2f}")
-
-                                # Update investable amount to rebalance base
-                                db.update_smallcase(sc_id, total_investable_amount=rebalance_base)
-
-                                # Clear cached prices
-                                st.session_state.pop(f"fetched_prices_{sc_id}", None)
-                                st.cache_data.clear()
-
-                                st.success(f"✅ Rebalance applied! Investable amount updated to ₹{rebalance_base:,.2f}")
-                                for a in applied:
-                                    st.markdown(f"- {a}")
-                                st.rerun()
-                        else:
-                            missing_prices = [row["Ticker"] for _, row in changes.iterrows()
-                                              if not (final_prices.get(row["Ticker"]) and final_prices[row["Ticker"]] > 0)]
-                            st.warning(f"Enter prices for: {', '.join(missing_prices)} before applying.")
-
-            except Exception as e:
-                st.error(f"Error reading CSV: {e}")
-                import traceback
-                st.code(traceback.format_exc())
+                    # Clear lookup cache
+                    st.session_state.pop(lookup_key, None)
+                    st.success(f"Added {ticker_clean} — {units} units")
+                    st.rerun()
 
     # ── Holdings Table ──────────────────────────────────────────────────────
     holdings = db.get_holdings(sc_id)
     if holdings.empty:
-        st.info("No stocks added yet. Use the form above or upload a CSV to add holdings.")
+        st.info("No stocks added yet — use **➕ Add Stock** above to add your first holding.")
         return
 
     table = build_holdings_table(holdings, total_amount, is_design)
