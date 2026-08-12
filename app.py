@@ -281,6 +281,240 @@ def color_pnl(val):
     return ""
 
 
+# ── Insight strip ───────────────────────────────────────────────────────────
+
+def _insight_card(title: str, headline: str, sub: str, tone: str = "neutral"):
+    """Small card used by the insight strip. `tone` drives the accent colour."""
+    accent = {"profit": "#00e676", "loss": "#ff5252",
+              "warn": "#ffca28", "neutral": "#8899a6"}.get(tone, "#8899a6")
+    st.markdown(f"""
+    <div style="background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.07);
+                border-left:3px solid {accent}; border-radius:8px;
+                padding:10px 14px; height:100%;">
+      <div style="font-size:10px; letter-spacing:1.4px; text-transform:uppercase;
+                  color:#8899a6; margin-bottom:4px;">{title}</div>
+      <div style="font-size:15px; font-weight:600; color:{accent}; line-height:1.3;">{headline}</div>
+      <div style="font-size:11px; color:#aab8c2; margin-top:2px;">{sub}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def render_insight_strip(table: pd.DataFrame):
+    """At-a-glance callouts above the holdings table: today's movers, best/worst
+    holding, and anything that needs attention (stop losses, concentration)."""
+    if table.empty:
+        return
+
+    live = table[table["% Chg"] != 0]
+    priced = table[table["Invested Amount"] > 0]
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    # Today's biggest mover (up)
+    with c1:
+        if not live.empty:
+            top = live.loc[live["% Chg"].idxmax()]
+            tone = "profit" if top["% Chg"] > 0 else "loss"
+            _insight_card("Today's Top Gainer",
+                          f"{top['Scrip Name'][:22]}  {top['% Chg']:+.2f}%",
+                          f"₹{top['Today Chg']:+,.2f} per share", tone)
+        else:
+            _insight_card("Today's Top Gainer", "—", "Live prices unavailable")
+
+    # Today's biggest mover (down)
+    with c2:
+        if not live.empty:
+            bot = live.loc[live["% Chg"].idxmin()]
+            tone = "loss" if bot["% Chg"] < 0 else "profit"
+            _insight_card("Today's Top Loser",
+                          f"{bot['Scrip Name'][:22]}  {bot['% Chg']:+.2f}%",
+                          f"₹{bot['Today Chg']:+,.2f} per share", tone)
+        else:
+            _insight_card("Today's Top Loser", "—", "Live prices unavailable")
+
+    # Best holding by P/L %
+    with c3:
+        if not priced.empty:
+            best = priced.loc[priced["P/L %"].idxmax()]
+            _insight_card("Best Holding",
+                          f"{best['Scrip Name'][:22]}  {best['P/L %']:+.1f}%",
+                          f"{format_inr(best['P/L'])} gain",
+                          "profit" if best["P/L"] >= 0 else "loss")
+        else:
+            _insight_card("Best Holding", "—", "No priced holdings")
+
+    # Needs attention: SL hits, then concentration, else worst drag
+    with c4:
+        sl_hits = table[table["_sl_triggered"]] if "_sl_triggered" in table.columns else pd.DataFrame()
+        heavy = table[table["Weightage %"] > 15]
+        if not sl_hits.empty:
+            names = ", ".join(sl_hits["Scrip Name"].head(2).tolist())
+            _insight_card("Needs Attention",
+                          f"🚨 {len(sl_hits)} stop-loss hit",
+                          names[:44], "loss")
+        elif not heavy.empty:
+            h = heavy.loc[heavy["Weightage %"].idxmax()]
+            _insight_card("Needs Attention",
+                          f"⚠️ {h['Scrip Name'][:18]} is {h['Weightage %']:.1f}%",
+                          f"{len(heavy)} position(s) above 15%", "warn")
+        elif not priced.empty:
+            worst = priced.loc[priced["P/L"].idxmin()]
+            if worst["P/L"] < 0:
+                _insight_card("Biggest Drag",
+                              f"{worst['Scrip Name'][:22]}  {worst['P/L %']:+.1f}%",
+                              f"{format_inr(worst['P/L'])}", "loss")
+            else:
+                _insight_card("Needs Attention", "✅ All clear",
+                              "No stop-loss or concentration flags", "profit")
+        else:
+            _insight_card("Needs Attention", "—", "")
+
+
+# ── Portfolio charts ────────────────────────────────────────────────────────
+
+_CHART_LAYOUT = dict(
+    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+    font_color="#e0e0e0", margin=dict(t=30, b=30, l=10, r=10),
+)
+
+
+def render_portfolio_charts(table: pd.DataFrame):
+    """P/L contribution by stock + allocation treemap."""
+    if table.empty:
+        return
+
+    ch1, ch2 = st.columns(2)
+
+    with ch1:
+        st.markdown("**P/L Contribution by Stock**")
+        d = table[["Scrip Name", "P/L"]].copy()
+        d = d[d["P/L"] != 0].sort_values("P/L")
+        if d.empty:
+            st.caption("No profit/loss to show yet.")
+        else:
+            fig = go.Figure(go.Bar(
+                x=d["P/L"], y=d["Scrip Name"], orientation="h",
+                marker_color=["#ff5252" if v < 0 else "#00e676" for v in d["P/L"]],
+                hovertemplate="%{y}<br>₹%{x:,.0f}<extra></extra>",
+            ))
+            fig.update_layout(
+                **_CHART_LAYOUT,
+                height=max(260, 26 * len(d)),
+                xaxis=dict(title="P/L (₹)", showgrid=True, gridcolor="#2d2d44",
+                           zerolinecolor="#4a4a6a"),
+                yaxis=dict(showgrid=False),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+    with ch2:
+        st.markdown("**Allocation** — size = market value, colour = return")
+        d = table[table["Market Value"] > 0][
+            ["Scrip Name", "Market Value", "P/L %", "P/L"]].copy()
+        if d.empty:
+            st.caption("No holdings to show yet.")
+        else:
+            fig = px.treemap(
+                d, path=["Scrip Name"], values="Market Value",
+                color="P/L %", color_continuous_scale=["#ff5252", "#37474f", "#00e676"],
+                color_continuous_midpoint=0,
+                custom_data=["P/L %", "P/L"],
+            )
+            fig.update_traces(
+                texttemplate="%{label}<br>%{customdata[0]:+.1f}%",
+                hovertemplate="%{label}<br>Value ₹%{value:,.0f}"
+                              "<br>Return %{customdata[0]:+.2f}%"
+                              "<br>P/L ₹%{customdata[1]:,.0f}<extra></extra>",
+            )
+            fig.update_layout(**_CHART_LAYOUT, height=max(260, 26 * len(d)),
+                              coloraxis_colorbar=dict(title="Return %"))
+            st.plotly_chart(fig, use_container_width=True)
+
+
+# ── Excel export ────────────────────────────────────────────────────────────
+
+EXPORT_COLS = ["Scrip Name", "Ticker", "Weightage %", "Units", "Buy Date",
+               "Buy Price", "Current Price", "Invested Amount", "Market Value",
+               "P/L", "P/L %", "Days Held", "XIRR %"]
+
+
+def build_portfolio_excel(table: pd.DataFrame, sc_name: str,
+                          summary: dict) -> bytes | None:
+    """Formatted single-sheet Excel statement. Returns None if openpyxl absent."""
+    try:
+        from openpyxl.styles import Font, PatternFill, Alignment
+        from openpyxl.utils import get_column_letter
+    except Exception:
+        return None
+
+    cols = [c for c in EXPORT_COLS if c in table.columns]
+    df = table[cols].copy()
+
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        # Table starts below a title + summary block
+        start_row = len(summary) + 4
+        df.to_excel(writer, index=False, sheet_name="Portfolio", startrow=start_row)
+        ws = writer.sheets["Portfolio"]
+
+        gold = Font(bold=True, size=14, color="B8860B")
+        ws.cell(row=1, column=1, value=f"{sc_name} — Portfolio Statement").font = gold
+        ws.cell(row=2, column=1,
+                value=f"As on {datetime.now().strftime('%d %b %Y, %I:%M %p')}").font = \
+            Font(size=9, italic=True, color="808080")
+
+        # Summary block
+        for i, (k, v) in enumerate(summary.items()):
+            r = 4 + i
+            ws.cell(row=r, column=1, value=k).font = Font(bold=True)
+            ws.cell(row=r, column=2, value=v)
+
+        # Header row styling
+        hdr_row = start_row + 1
+        head_fill = PatternFill("solid", fgColor="1F3864")
+        for c in range(1, len(cols) + 1):
+            cell = ws.cell(row=hdr_row, column=c)
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = head_fill
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+        # Number formats + red/green P/L
+        money = '#,##0.00'
+        pct = '0.00"%"'
+        fmt_map = {"Buy Price": money, "Current Price": money,
+                   "Invested Amount": money, "Market Value": money, "P/L": money,
+                   "Weightage %": pct, "P/L %": pct, "XIRR %": pct, "Units": '#,##0.00'}
+        for ci, name in enumerate(cols, start=1):
+            if name in fmt_map:
+                for r in range(hdr_row + 1, hdr_row + 1 + len(df)):
+                    ws.cell(row=r, column=ci).number_format = fmt_map[name]
+            if name in ("P/L", "P/L %", "XIRR %"):
+                for r in range(hdr_row + 1, hdr_row + 1 + len(df)):
+                    cell = ws.cell(row=r, column=ci)
+                    if isinstance(cell.value, (int, float)):
+                        cell.font = Font(color="008000" if cell.value >= 0 else "CC0000")
+
+        # Totals row
+        tot_row = hdr_row + len(df) + 1
+        ws.cell(row=tot_row, column=1, value="TOTAL").font = Font(bold=True)
+        for ci, name in enumerate(cols, start=1):
+            if name in ("Invested Amount", "Market Value", "P/L"):
+                col = get_column_letter(ci)
+                cell = ws.cell(row=tot_row, column=ci)
+                cell.value = f"=SUM({col}{hdr_row+1}:{col}{hdr_row+len(df)})"
+                cell.font = Font(bold=True)
+                cell.number_format = money
+
+        # Column widths + frozen header
+        for ci, name in enumerate(cols, start=1):
+            longest = max([len(str(name))] +
+                          [len(str(v)) for v in df[name].head(60).tolist()])
+            ws.column_dimensions[get_column_letter(ci)].width = min(max(longest + 2, 11), 34)
+        ws.freeze_panes = ws.cell(row=hdr_row + 1, column=1)
+
+    buf.seek(0)
+    return buf.getvalue()
+
+
 def build_holdings_table(holdings_df: pd.DataFrame, total_amount: float,
                          is_design: bool = False) -> pd.DataFrame:
     """Build the full calculated holdings table with live data."""
@@ -1679,10 +1913,22 @@ def render_smallcase(sc: dict):
         wt_class = "profit" if abs(total_wt - 100) < 1 else "loss"
         metric_card("Total Weightage", f"{total_wt:.1f}%", wt_class)
 
+    # ── Insight strip ───────────────────────────────────────────────────────
+    st.markdown("---")
+    render_insight_strip(table)
+
     st.markdown("---")
 
     # Main holdings table
-    st.subheader("Holdings")
+    hdr_l, hdr_r = st.columns([3, 2])
+    with hdr_l:
+        st.subheader("Holdings")
+    with hdr_r:
+        show_all = st.toggle(
+            "Show all details", value=False, key=f"cols_all_{sc_id}",
+            help="Adds Buy Date, Days Held, XIRR and per-share daily change.",
+        )
+
     display_cols = ["Scrip Name", "Ticker", "Weightage %", "Units",
                     "Buy Date", "Buy Price", "Current Price",
                     "Invested Amount", "Market Value", "P/L", "P/L %",
@@ -1708,13 +1954,24 @@ def render_smallcase(sc: dict):
 
     # Only show Stop Loss columns when at least one stock has one set
     has_sl = display_df["Stop Loss"].apply(lambda x: x != "").any()
+    # Industry is only populated if the user typed it in (no longer auto-fetched)
+    has_industry = display_df["Industry"].astype(str).str.strip().ne("").any()
 
-    final_cols = ["Stock", "Weightage %", "Units", "Buy Date", "Buy Price",
-                  "Current Price", "Stop Loss", "🚨 SL Hit",
-                  "Invested Amount", "Market Value", "P/L",
-                  "P/L %", "Days Held", "XIRR %", "Today Chg", "% Chg", "Industry"]
+    if show_all:
+        final_cols = ["Stock", "Weightage %", "Units", "Buy Date", "Buy Price",
+                      "Current Price", "Stop Loss", "🚨 SL Hit",
+                      "Invested Amount", "Market Value", "P/L",
+                      "P/L %", "Days Held", "XIRR %", "Today Chg", "% Chg", "Industry"]
+    else:
+        # Compact view: the columns needed to judge a position at a glance
+        final_cols = ["Stock", "Weightage %", "Units", "Buy Price", "Current Price",
+                      "Stop Loss", "🚨 SL Hit", "Invested Amount", "Market Value",
+                      "P/L", "P/L %", "% Chg"]
+
     if not has_sl:
         final_cols = [c for c in final_cols if c not in ("Stop Loss", "🚨 SL Hit")]
+    if not has_industry:
+        final_cols = [c for c in final_cols if c != "Industry"]
 
     display_df = display_df[[c for c in final_cols if c in display_df.columns]]
 
@@ -1744,23 +2001,81 @@ def render_smallcase(sc: dict):
     }
     if has_sl:
         fmt["Stop Loss"] = lambda x: f"₹{x:,.2f}" if isinstance(x, (int, float)) and x > 0 else ""
+    # Restrict to columns actually present in the chosen view
+    fmt = {k: v for k, v in fmt.items() if k in display_df.columns}
+    pnl_cols = [c for c in ("P/L", "P/L %", "XIRR %", "Today Chg", "% Chg")
+                if c in display_df.columns]
+
+    # Keep the stock name visible while scrolling right (Streamlit >= 1.43)
+    stock_col_kw = dict(
+        help="Click the stock name to open its chart on TradingView",
+        display_text=r"#~(.+)$",
+        width="medium",
+    )
+    try:
+        stock_col = st.column_config.LinkColumn("Stock 📈", pinned=True, **stock_col_kw)
+    except TypeError:
+        stock_col = st.column_config.LinkColumn("Stock 📈", **stock_col_kw)
 
     st.dataframe(
         display_df.style
             .apply(_highlight_sl, axis=1)
-            .map(color_pnl, subset=["P/L", "P/L %", "XIRR %", "Today Chg", "% Chg"])
+            .map(color_pnl, subset=pnl_cols)
             .format(fmt),
         width="stretch", hide_index=True,
-        height=min(400, 50 + 35 * len(display_df)),
-        column_config={
-            "Stock": st.column_config.LinkColumn(
-                "Stock 📈",
-                help="Click the stock name to open its chart on TradingView",
-                display_text=r"#~(.+)$",
-                width="medium",
-            ),
-        },
+        height=min(560, 50 + 35 * len(display_df)),
+        column_config={"Stock": stock_col},
     )
+    st.caption(
+        "Click any column header to sort. "
+        + ("Showing all columns." if show_all
+           else "Compact view — turn on **Show all details** for Buy Date, Days Held and XIRR.")
+    )
+
+    # ── Visual breakdown ────────────────────────────────────────────────────
+    with st.expander("📊 Visual Breakdown", expanded=False):
+        render_portfolio_charts(table)
+
+    # ── Portfolio statement / export ────────────────────────────────────────
+    with st.expander("📄 Portfolio Statement (share / export)", expanded=False):
+        st.markdown(f"### {sc['name']} — Portfolio Statement")
+        st.caption(f"As on {datetime.now().strftime('%d %b %Y, %I:%M %p')}")
+
+        sm1, sm2, sm3, sm4 = st.columns(4)
+        sm1.metric("Invested", format_inr(total_inv))
+        sm2.metric("Market Value", format_inr(total_mv))
+        sm3.metric("Total P/L", format_inr(total_pl), f"{total_pl_pct:+.2f}%")
+        sm4.metric("Holdings", str(len(table)))
+
+        summary = {
+            "Invested": round(float(total_inv), 2),
+            "Market Value": round(float(total_mv), 2),
+            "Unrealized P/L": round(float(unrealized_pl), 2),
+            "Realized P/L": round(float(realized_pl), 2),
+            "Total P/L": round(float(total_pl), 2),
+            "Total P/L %": round(float(total_pl_pct), 2),
+            "Holdings": len(table),
+        }
+
+        xls_bytes = build_portfolio_excel(table, sc["name"], summary)
+        stamp = datetime.now().strftime("%Y%m%d")
+        safe_name = "".join(ch if ch.isalnum() else "_" for ch in sc["name"])
+        if xls_bytes:
+            st.download_button(
+                "⬇️ Download Excel Statement", data=xls_bytes,
+                file_name=f"{safe_name}_statement_{stamp}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key=f"xls_dl_{sc_id}",
+            )
+        else:
+            csv_cols = [c for c in EXPORT_COLS if c in table.columns]
+            st.download_button(
+                "⬇️ Download CSV Statement",
+                data=table[csv_cols].to_csv(index=False).encode("utf-8"),
+                file_name=f"{safe_name}_statement_{stamp}.csv",
+                mime="text/csv", key=f"csv_dl_{sc_id}",
+            )
+        st.caption("Tip: use your browser's Print (Ctrl+P) on this page to save a PDF.")
 
     # ── Edit / Delete / Exit Actions ────────────────────────────────────────
     st.subheader("Manage Holdings")
