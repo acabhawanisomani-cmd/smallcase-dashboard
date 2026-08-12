@@ -780,8 +780,31 @@ def _parse_rw_xls(file_bytes: bytes):
     if dm:
         date_range = f"{dm.group(1)} to {dm.group(2)}"
 
+    def _num(v):
+        """Parse a numeric cell that may carry thousands separators, currency
+        symbols or parenthesised negatives. Statements format amounts over 999
+        as '1,234.56', which a bare float() would reject."""
+        if v is None:
+            return None
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return float(v)
+        s = str(v).strip()
+        if not s or s.lower() in ('nan', 'none', '-'):
+            return None
+        neg = s.startswith('(') and s.endswith(')')
+        if neg:
+            s = s[1:-1]
+        s = (s.replace(',', '').replace('₹', '')
+              .replace('Rs.', '').replace('Rs', '').strip())
+        try:
+            f = float(s)
+        except ValueError:
+            return None
+        return -f if neg else f
+
     # Parse transaction rows
     data_rows, current_group = [], None
+    skipped_rows = []
     for _, row in df.iterrows():
         val = str(row[0]).strip()
         if val.startswith('Group:'):
@@ -789,18 +812,20 @@ def _parse_rw_xls(file_bytes: bytes):
         elif val in ('Group Total', 'Grand Total') or 'Client:' in val or val == 'Scrip Name':
             continue
         elif pd.notna(row[1]) and str(row[1]).strip() not in ('Transaction Date', 'NaN', 'nan', ''):
-            try:
-                data_rows.append({
-                    'group': current_group,
-                    'scrip': val,
-                    'date': str(row[1]).strip(),
-                    'type': str(row[2]).strip(),
-                    'qty': float(row[3]),
-                    'rate': float(row[4]),
-                    'amount': float(row[5]),
-                })
-            except Exception:
-                pass
+            qty, rate, amount = _num(row[3]), _num(row[4]), _num(row[5])
+            if qty is None or amount is None:
+                # Never drop silently — a discarded row corrupts the holdings.
+                skipped_rows.append(f"{val} | {row[1]} | qty={row[3]!r} amt={row[5]!r}")
+                continue
+            data_rows.append({
+                'group': current_group,
+                'scrip': val,
+                'date': str(row[1]).strip(),
+                'type': str(row[2]).strip(),
+                'qty': qty,
+                'rate': rate if rate is not None else 0.0,
+                'amount': amount,
+            })
 
     if not data_rows:
         raise ValueError("No transaction rows found in the file. Is this the correct format?")
@@ -827,12 +852,18 @@ def _parse_rw_xls(file_bytes: bytes):
         holdings.append({
             'scrip_name': scrip,
             'group': hmap_group.get(scrip, ''),
+            'buy_qty': h['buy_qty'],
+            'sell_qty': h['sell_qty'],
             'net_qty': net_qty,
             'avg_cost': avg_cost,
-            'invested': round(avg_cost * net_qty, 2),
+            'invested': round(avg_cost * net_qty, 2) if net_qty > 0 else 0.0,
         })
 
-    return scheme_name, holdings, date_range
+    meta = {
+        'txn_count': len(data_rows),
+        'skipped_rows': skipped_rows,
+    }
+    return scheme_name, holdings, date_range, meta
 
 
 def _render_rw_import(sc: dict, sc_id: int, total_amount: float):
@@ -859,11 +890,22 @@ def _render_rw_import(sc: dict, sc_id: int, total_amount: float):
 
         try:
             raw_bytes = uploaded.read()
-            scheme_name, holdings_raw, date_range = _parse_rw_xls(raw_bytes)
+            scheme_name, holdings_raw, date_range, parse_meta = _parse_rw_xls(raw_bytes)
 
             if not holdings_raw:
                 st.error("No holdings found in the statement.")
                 return
+
+            # Surface any rows we could not read — silently dropping them would
+            # corrupt the computed holdings.
+            bad_rows = parse_meta.get('skipped_rows') or []
+            if bad_rows:
+                st.error(
+                    f"⚠️ {len(bad_rows)} transaction row(s) could not be read and were "
+                    "excluded. The holdings below may be incomplete."
+                )
+                with st.expander("Show unreadable rows"):
+                    st.code("\n".join(bad_rows), language="text")
 
             # Build scrip→ticker map from existing holdings in this folio
             existing_h = db.get_holdings(sc_id, active_only=False)
@@ -884,6 +926,8 @@ def _render_rw_import(sc: dict, sc_id: int, total_amount: float):
                     'Group': h.get('group', ''),
                     'Scrip Name': h['scrip_name'],
                     'NSE Ticker': ticker_guess,
+                    'Bought': h.get('buy_qty', 0),
+                    'Sold': h.get('sell_qty', 0),
                     'Net Qty': h['net_qty'],
                     'Avg Cost (₹)': h['avg_cost'],
                     'Invested (₹)': h['invested'],
@@ -893,17 +937,31 @@ def _render_rw_import(sc: dict, sc_id: int, total_amount: float):
 
             active_count = sum(1 for r in edit_rows if r['Net Qty'] > 0)
             exited_count = sum(1 for r in edit_rows if r['Net Qty'] == 0)
+            negative_rows = [r for r in edit_rows if r['Net Qty'] < 0]
             total_all = sum(r['Invested (₹)'] for r in edit_rows if r['Net Qty'] > 0)
 
             st.markdown(
                 f"**Scheme:** {scheme_name} | **Period:** {date_range} | "
-                f"**{active_count}** active positions, **{exited_count}** fully exited | "
+                f"**{parse_meta.get('txn_count', 0)}** transactions read | "
+                f"**{active_count}** open, **{exited_count}** fully exited | "
                 f"**Total invested: ₹{total_all:,.2f}**"
             )
+
+            if negative_rows:
+                names = ", ".join(r['Scrip Name'] for r in negative_rows)
+                st.warning(
+                    f"⚠️ **{len(negative_rows)} holding(s) sold more than bought within this "
+                    f"statement period**: {names}.\n\n"
+                    "This means shares were purchased **before** the statement's start date, "
+                    "so this file alone cannot determine their true cost. They are excluded "
+                    "by default. To capture them, re-download the statement with a start date "
+                    "covering the original purchase."
+                )
+
             st.caption(
-                "Fill in the **NSE Ticker** column for each stock/fund. "
-                "Stocks already in this folio are auto-filled. "
-                "Uncheck 'Include' for any holding you want to skip (e.g. liquid sweep fund)."
+                "Only holdings with **Net Qty > 0** are ticked — these are your current "
+                "positions. Fill in the **NSE Ticker** for each; stocks already in this folio "
+                "are auto-filled. Untick anything you want to skip (e.g. the liquid sweep fund)."
             )
 
             edited = st.data_editor(
@@ -916,6 +974,8 @@ def _render_rw_import(sc: dict, sc_id: int, total_amount: float):
                         'NSE Ticker', width='medium',
                         help="NSE ticker symbol without .NS suffix (e.g., MANINDS, HFCL, SCI)."
                     ),
+                    'Bought': st.column_config.NumberColumn('Bought', disabled=True, format='%.0f', width='small'),
+                    'Sold': st.column_config.NumberColumn('Sold', disabled=True, format='%.0f', width='small'),
                     'Net Qty': st.column_config.NumberColumn('Net Qty', disabled=True, format='%.0f', width='small'),
                     'Avg Cost (₹)': st.column_config.NumberColumn('Avg Cost (₹)', disabled=True, format='%.2f'),
                     'Invested (₹)': st.column_config.NumberColumn('Invested (₹)', disabled=True, format='%.2f'),
