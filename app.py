@@ -1725,6 +1725,10 @@ def render_smallcase(sc: dict):
             return ["background-color: rgba(255,50,50,0.25); color: #ff8080"] * len(row)
         return [""] * len(row)
 
+    def _pct_or_dash(x):
+        """XIRR is blank for same-day/invalid holdings — render as an em dash."""
+        return f"{x:.2f}%" if isinstance(x, (int, float)) else "—"
+
     fmt = {
         "Weightage %": "{:.1f}%",
         "Units": "{:.2f}",
@@ -1734,6 +1738,7 @@ def render_smallcase(sc: dict):
         "Market Value": "₹{:,.0f}",
         "P/L": "₹{:,.0f}",
         "P/L %": "{:.2f}%",
+        "XIRR %": _pct_or_dash,
         "Today Chg": "₹{:,.2f}",
         "% Chg": "{:.2f}%",
     }
@@ -1743,7 +1748,7 @@ def render_smallcase(sc: dict):
     st.dataframe(
         display_df.style
             .apply(_highlight_sl, axis=1)
-            .map(color_pnl, subset=["P/L", "P/L %", "Today Chg", "% Chg"])
+            .map(color_pnl, subset=["P/L", "P/L %", "XIRR %", "Today Chg", "% Chg"])
             .format(fmt),
         width="stretch", hide_index=True,
         height=min(400, 50 + 35 * len(display_df)),
