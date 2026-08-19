@@ -108,6 +108,69 @@ st.markdown("""
         background: linear-gradient(90deg, #d4af37, #f0d060, #d4af37);
     }
 
+    /* ── Sidebar navigation: compact, left-aligned, single-line ── */
+    div[data-testid="stSidebar"] .stButton > button {
+        background: transparent;
+        border: 1px solid transparent;
+        border-radius: 7px;
+        color: #cfd8e3;
+        font-size: 13.5px;
+        font-weight: 500;
+        line-height: 1.25;
+        padding: 6px 10px;
+        min-height: 0;
+        height: auto;
+        margin: 1px 0;
+        text-align: left;
+        justify-content: flex-start;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        transition: background .12s ease, border-color .12s ease;
+    }
+    div[data-testid="stSidebar"] .stButton > button p {
+        text-align: left;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        font-size: 13.5px;
+        margin: 0;
+    }
+    div[data-testid="stSidebar"] .stButton > button:hover {
+        background: rgba(212, 175, 55, 0.09);
+        border-color: rgba(212, 175, 55, 0.28);
+        color: #f0d060;
+    }
+    /* Active item — gold left rail */
+    div[data-testid="stSidebar"] .stButton > button[kind="primary"] {
+        background: rgba(212, 175, 55, 0.14);
+        border-color: rgba(212, 175, 55, 0.40);
+        border-left: 3px solid #d4af37;
+        color: #f5e6a8;
+        font-weight: 600;
+    }
+    div[data-testid="stSidebar"] .stButton > button[kind="primary"]:hover {
+        background: rgba(212, 175, 55, 0.20);
+    }
+
+    /* Group expander headers */
+    div[data-testid="stSidebar"] details {
+        border: none !important;
+        background: transparent !important;
+        margin-bottom: 2px;
+    }
+    div[data-testid="stSidebar"] summary {
+        font-size: 11px !important;
+        font-weight: 700 !important;
+        letter-spacing: 1.1px;
+        text-transform: uppercase;
+        color: #8a97a8 !important;
+        padding: 4px 6px !important;
+    }
+    div[data-testid="stSidebar"] summary:hover { color: #d4af37 !important; }
+    /* Tighten the vertical rhythm of stacked nav items */
+    div[data-testid="stSidebar"] div[data-testid="stVerticalBlock"] { gap: 0.15rem; }
+
     /* ── Metric cards: Peacock feather inspired gradient ── */
     .metric-card {
         background: linear-gradient(135deg, #0b1a3a 0%, #0f2244 50%, #112a4a 100%);
@@ -630,21 +693,19 @@ st.sidebar.markdown("---")
 if "nav" not in st.session_state:
     st.session_state["nav"] = "🏠 Master Dashboard"
 
-def _nav_btn(label: str, key: str):
-    """Render a nav button; highlights when active."""
+def _nav_btn(label: str, key: str, container=None, tooltip: str | None = None):
+    """Render a nav button. Active item uses type='primary' so the CSS above
+    can style it with a gold left rail."""
+    target = container if container is not None else st.sidebar
     is_active = st.session_state["nav"] == label
-    btn_style = (
-        "background:#1a3a5c;color:#fff;border:1px solid #4a9eff;"
-        "border-radius:6px;padding:6px 10px;width:100%;text-align:left;"
-        "cursor:pointer;margin-bottom:3px;font-size:14px;"
-    ) if is_active else (
-        "background:transparent;color:#ccc;border:1px solid transparent;"
-        "border-radius:6px;padding:6px 10px;width:100%;text-align:left;"
-        "cursor:pointer;margin-bottom:3px;font-size:14px;"
-    )
-    if st.sidebar.button(label, key=key, use_container_width=True):
+    if target.button(
+        label, key=key, use_container_width=True,
+        type="primary" if is_active else "secondary",
+        help=tooltip,
+    ):
         st.session_state["nav"] = label
         st.rerun()
+
 
 # Master Dashboard — always at top
 _nav_btn("🏠 Master Dashboard", "nav_master")
@@ -662,20 +723,25 @@ for _sc in all_sc:
     else:
         _ungrouped.append((_label, _sc))
 
-# Render each group as a collapsible expander
+# Render each group as a collapsible section, with a count badge so you can see
+# how many folios a collapsed group holds without opening it.
 for _grp_name, _folios in sorted(_groups.items()):
     _active_in_group = any(st.session_state["nav"] == lbl for lbl, _ in _folios)
-    with st.sidebar.expander(f"📂 {_grp_name}", expanded=_active_in_group):
+    _hdr = f"{_grp_name}  ·  {len(_folios)}"
+    with st.sidebar.expander(_hdr, expanded=_active_in_group):
         for _lbl, _sc in _folios:
-            _is_sel = st.session_state["nav"] == _lbl
-            _prefix = "▶ " if _is_sel else "    "
-            if st.button(f"{_prefix}{_lbl}", key=f"nav_{_sc['id']}", use_container_width=True):
-                st.session_state["nav"] = _lbl
-                st.rerun()
+            _nav_btn(_lbl, f"nav_{_sc['id']}", container=st,
+                     tooltip=_sc["name"])
 
 # Ungrouped folios (no group assigned yet) — show flat below groups
-for _lbl, _sc in _ungrouped:
-    _nav_btn(_lbl, f"nav_{_sc['id']}")
+if _ungrouped:
+    st.sidebar.markdown(
+        "<div style='font-size:11px;font-weight:700;letter-spacing:1.1px;"
+        "text-transform:uppercase;color:#8a97a8;padding:6px 6px 2px;'>Ungrouped</div>",
+        unsafe_allow_html=True,
+    )
+    for _lbl, _sc in _ungrouped:
+        _nav_btn(_lbl, f"nav_{_sc['id']}", tooltip=_sc["name"])
 
 nav = st.session_state["nav"]
 
@@ -1345,9 +1411,23 @@ def render_smallcase(sc: dict):
                 st.rerun()
     with col_s5:
         st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("🗑️ Delete", key=f"del_{sc_id}"):
-            db.delete_smallcase(sc_id)
-            st.rerun()
+        confirm_key = f"confirm_del_{sc_id}"
+        if st.session_state.get(confirm_key):
+            st.caption(f"Delete **{sc['name']}**?")
+            dc1, dc2 = st.columns(2)
+            if dc1.button("✅ Yes", key=f"del_yes_{sc_id}", type="primary"):
+                db.delete_smallcase(sc_id)
+                st.session_state.pop(confirm_key, None)
+                st.session_state["nav"] = "🏠 Master Dashboard"
+                st.rerun()
+            if dc2.button("✖ No", key=f"del_no_{sc_id}"):
+                st.session_state.pop(confirm_key, None)
+                st.rerun()
+        else:
+            if st.button("🗑️ Delete", key=f"del_{sc_id}",
+                         help="Permanently deletes this folio and all its holdings"):
+                st.session_state[confirm_key] = True
+                st.rerun()
 
     # ── Group assignment row ────────────────────────────────────────────────
     gcol1, gcol2 = st.columns([2, 4])
