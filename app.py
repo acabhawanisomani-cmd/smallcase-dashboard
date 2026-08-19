@@ -128,29 +128,56 @@ st.markdown("""
         text-overflow: ellipsis;
         transition: background .12s ease, border-color .12s ease;
     }
+    /* The label lives in a <p> inside the button; it needs its own overflow
+       rules (and min-width:0 to be allowed to shrink inside the flex button)
+       or long folio names clip mid-word with no ellipsis. */
     div[data-testid="stSidebar"] .stButton > button p {
+        display: block;
+        width: 100%;
+        min-width: 0;
+        max-width: 100%;
         text-align: left;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
         font-size: 13.5px;
+        line-height: 1.3;
         margin: 0;
+    }
+    div[data-testid="stSidebar"] .stButton > button > div {
+        width: 100%;
+        min-width: 0;
+        justify-content: flex-start;
     }
     div[data-testid="stSidebar"] .stButton > button:hover {
         background: rgba(212, 175, 55, 0.09);
         border-color: rgba(212, 175, 55, 0.28);
         color: #f0d060;
     }
-    /* Active item — gold left rail */
-    div[data-testid="stSidebar"] .stButton > button[kind="primary"] {
-        background: rgba(212, 175, 55, 0.14);
-        border-color: rgba(212, 175, 55, 0.40);
-        border-left: 3px solid #d4af37;
-        color: #f5e6a8;
-        font-weight: 600;
+    /* Active item — gold left rail.
+       Streamlit's own primary-button styles are highly specific (emotion
+       classes), so these need !important to win. */
+    div[data-testid="stSidebar"] .stButton > button[kind="primary"],
+    div[data-testid="stSidebar"] .stButton > button[data-testid="stBaseButton-primary"] {
+        background: rgba(212, 175, 55, 0.14) !important;
+        background-color: rgba(212, 175, 55, 0.14) !important;
+        background-image: none !important;
+        border: 1px solid rgba(212, 175, 55, 0.40) !important;
+        border-left: 3px solid #d4af37 !important;
+        color: #f5e6a8 !important;
+        font-weight: 600 !important;
+        box-shadow: none !important;
     }
-    div[data-testid="stSidebar"] .stButton > button[kind="primary"]:hover {
-        background: rgba(212, 175, 55, 0.20);
+    div[data-testid="stSidebar"] .stButton > button[kind="primary"] p,
+    div[data-testid="stSidebar"] .stButton > button[data-testid="stBaseButton-primary"] p {
+        color: #f5e6a8 !important;
+    }
+    div[data-testid="stSidebar"] .stButton > button[kind="primary"]:hover,
+    div[data-testid="stSidebar"] .stButton > button[data-testid="stBaseButton-primary"]:hover {
+        background: rgba(212, 175, 55, 0.22) !important;
+        background-color: rgba(212, 175, 55, 0.22) !important;
+        border-color: rgba(212, 175, 55, 0.55) !important;
+        color: #ffe9a8 !important;
     }
 
     /* Group expander headers */
