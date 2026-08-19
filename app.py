@@ -738,6 +738,8 @@ def _nav_btn(label: str, key: str, container=None, tooltip: str | None = None):
 _nav_btn("🏠 Master Dashboard", "nav_master")
 # Mutual Funds — always visible as second item
 _nav_btn("📊 Mutual Funds", "nav_mf")
+# News across every folio's holdings
+_nav_btn("📰 News", "nav_news")
 
 # Group folios by group_name
 _groups: dict[str, list] = {}
@@ -1526,6 +1528,9 @@ def render_smallcase(sc: dict):
         i += 1
     _panel_button("➕ Add Stock", "add", btn_cols[i],
                   "Add a new holding to this folio")
+    i += 1
+    _panel_button("📰 News", "news", btn_cols[i],
+                  "Latest headlines for the stocks in this folio")
 
     if is_rw and active_panel == "rw":
         _render_rw_import(sc, sc_id, total_amount)
@@ -1651,6 +1656,10 @@ def render_smallcase(sc: dict):
     if holdings.empty:
         st.info("No stocks added yet — use **➕ Add Stock** above to add your first holding.")
         return
+
+    # News panel (rendered here so it can use this folio's holdings)
+    if active_panel == "news":
+        _render_folio_news(sc, sc_id, holdings)
 
     table = build_holdings_table(holdings, total_amount, is_design)
     if table.empty:
@@ -2416,6 +2425,144 @@ def render_smallcase(sc: dict):
         st.info("No transactions recorded yet.")
 
 
+# ── News ────────────────────────────────────────────────────────────────────
+
+def _news_block(scrip_name: str, items: list, badge: str = ""):
+    """Render one company's headlines as a compact card."""
+    tag = (f"<span style='font-size:10px;color:#8899a6;border:1px solid rgba(255,255,255,.12);"
+           f"border-radius:10px;padding:1px 7px;margin-left:8px;'>{badge}</span>"
+           if badge else "")
+    st.markdown(
+        f"<div style='margin:14px 0 4px;'>"
+        f"<span style='font-size:13px;font-weight:700;color:#d4af37;"
+        f"letter-spacing:.4px;'>{scrip_name}</span>{tag}</div>",
+        unsafe_allow_html=True,
+    )
+    if not items:
+        st.markdown(
+            "<div style='font-size:12px;color:#6b7785;padding:2px 0 6px;'>"
+            "No recent headlines.</div>", unsafe_allow_html=True)
+        return
+    for it in items:
+        meta = " · ".join(x for x in (it.get("source", ""),
+                                      fin.news_time_ago(it.get("published"))) if x)
+        st.markdown(
+            f"<div style='padding:5px 0 6px;border-bottom:1px solid rgba(255,255,255,.05);'>"
+            f"<a href='{it['link']}' target='_blank' style='color:#dbe4ee;"
+            f"text-decoration:none;font-size:13.5px;line-height:1.45;'>{it['title']}</a>"
+            f"<div style='font-size:11px;color:#7d8895;margin-top:2px;'>{meta}</div></div>",
+            unsafe_allow_html=True,
+        )
+
+
+def _collect_news(pairs: list, per_stock: int, show_progress: bool = True):
+    """pairs: list of (scrip_name, ticker, badge). Returns list of tuples with items."""
+    out = []
+    bar = st.progress(0.0, text="Fetching news…") if show_progress and pairs else None
+    for i, (name, ticker, badge) in enumerate(pairs, start=1):
+        try:
+            items = fin.fetch_stock_news(name, ticker, limit=per_stock)
+        except Exception:
+            items = []
+        out.append((name, badge, items))
+        if bar:
+            bar.progress(i / len(pairs), text=f"Fetching news… {i}/{len(pairs)}")
+    if bar:
+        bar.empty()
+    return out
+
+
+def render_news_page():
+    st.title("📰 News")
+    st.caption(
+        "Headlines for every stock across your folios — company news, orders, "
+        "results and regulatory updates. Cached ~6 hours; click any headline "
+        "to open the full article."
+    )
+
+    if not all_sc:
+        st.info("Add a folio first — news is built from your holdings.")
+        return
+
+    # Map each stock to the folios that hold it
+    stock_map: dict[str, dict] = {}
+    for _s in all_sc:
+        try:
+            h = db.get_holdings(_s["id"])
+        except Exception:
+            continue
+        for _, row in h.iterrows():
+            tk = str(row["ticker"]).strip().upper()
+            if tk == db.RESIDUAL_TICKER:      # liquid sweep fund — no news value
+                continue
+            key = str(row["scrip_name"]).strip()
+            e = stock_map.setdefault(key, {"ticker": tk, "folios": set()})
+            e["folios"].add(_s["name"])
+
+    if not stock_map:
+        st.info("No holdings yet — add stocks to a folio to see news here.")
+        return
+
+    folio_names = sorted({f for v in stock_map.values() for f in v["folios"]})
+    c1, c2, c3 = st.columns([2, 1, 1])
+    with c1:
+        pick = st.selectbox("Folio", ["All folios"] + folio_names, key="news_folio")
+    with c2:
+        per_stock = st.selectbox("Headlines per stock", [3, 5, 8], index=0,
+                                 key="news_per_stock")
+    with c3:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("🔄 Refresh", key="news_refresh",
+                     help="Clear the 6-hour cache and pull fresh headlines"):
+            fin.fetch_stock_news.clear()
+            st.rerun()
+
+    pairs = [
+        (name, v["ticker"], ", ".join(sorted(v["folios"])))
+        for name, v in sorted(stock_map.items())
+        if pick == "All folios" or pick in v["folios"]
+    ]
+
+    st.caption(f"{len(pairs)} stock(s) · first load takes a few seconds, then it's cached.")
+    st.markdown("---")
+
+    blocks = _collect_news(pairs, per_stock)
+    total = sum(len(items) for _, _, items in blocks)
+    if total == 0:
+        st.warning("No headlines found. Google News may be rate-limiting — "
+                   "try **🔄 Refresh** in a minute.")
+        return
+
+    for name, badge, items in blocks:
+        _news_block(name, items, badge)
+
+
+def _render_folio_news(sc: dict, sc_id: int, holdings: pd.DataFrame):
+    """News panel inside a folio, scoped to that folio's holdings."""
+    with st.container(border=True):
+        top, right = st.columns([3, 1])
+        with top:
+            st.markdown(f"**Latest news for {sc['name']} holdings**")
+        with right:
+            if st.button("🔄 Refresh", key=f"news_ref_{sc_id}",
+                         use_container_width=True):
+                fin.fetch_stock_news.clear()
+                st.rerun()
+
+        pairs = [
+            (str(r["scrip_name"]).strip(), str(r["ticker"]).strip().upper(), "")
+            for _, r in holdings.iterrows()
+            if str(r["ticker"]).strip().upper() != db.RESIDUAL_TICKER
+        ]
+        if not pairs:
+            st.info("No holdings to fetch news for.")
+            return
+
+        st.caption(f"{len(pairs)} stock(s) · cached ~6 hours")
+        for name, _, items in _collect_news(pairs, 3):
+            _news_block(name, items)
+
+
 # ── Mutual Fund Dashboard ────────────────────────────────────────────────────
 
 def render_mutual_funds():
@@ -2652,6 +2799,8 @@ if nav == "🏠 Master Dashboard":
     render_master_dashboard()
 elif nav == "📊 Mutual Funds":
     render_mutual_funds()
+elif nav == "📰 News":
+    render_news_page()
 else:
     # Find the matching smallcase
     for sc in all_sc:

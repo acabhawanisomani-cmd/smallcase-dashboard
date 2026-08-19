@@ -8,7 +8,8 @@ rate-limiting. Direct requests are pure-Python and simply fail gracefully.
 
 import pandas as pd
 import numpy as np
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
+import re
 import time
 import requests
 import streamlit as st
@@ -422,3 +423,173 @@ def fetch_mf_nav(scheme_code: int) -> dict:
 def fetch_mf_nav_batch(scheme_codes: list[int]) -> dict[int, dict]:
     """Fetch NAV for multiple scheme codes."""
     return {code: fetch_mf_nav(code) for code in scheme_codes}
+
+
+# ── News (Google News RSS) ──────────────────────────────────────────────────
+# Free, no API key, India-localised. Parsed with the stdlib XML module so no
+# new dependency is introduced (see the yfinance note at the top of this file).
+
+import xml.etree.ElementTree as _ET
+from email.utils import parsedate_to_datetime as _parse_rfc822
+from urllib.parse import quote_plus as _qp
+
+NEWS_TTL = 6 * 3600  # 6 hours — matches "updated once or twice a day"
+
+_NEWS_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/rss+xml,application/xml,text/xml,*/*",
+}
+
+# Corporate suffixes to strip so "SHILPA MEDICARE LTD" -> "Shilpa Medicare"
+_SUFFIX_RE = re.compile(
+    r"\b(LTD|LIMITED|LIMITE|CORP|CORPORATION|COMPANY|CO|PVT|PRIVATE|THE|L)\b\.?\s*$",
+    re.I,
+)
+
+# Algorithmic price-target / "share price today" filler pages carry no real news
+_NOISE_RE = re.compile(
+    r"(price\s+target|prediction\s+for\s+\d{4}|forecast\s*[—–-]|"
+    r"share\s+price\s+(today|now|live)|"
+    r"(at|near)\s+52[\s-]week|"
+    r"technical\s+analysis|stock\s+analysis\s+report|"
+    r"should\s+you\s+buy|multibagger)",
+    re.I,
+)
+
+
+def clean_company_name(name: str) -> str:
+    """Normalise a scrip name into something searchable."""
+    n = re.sub(r"[^\w\s&().-]", " ", str(name or "")).strip()
+    prev = None
+    while prev != n:                       # names can end in several suffixes
+        prev = n
+        n = _SUFFIX_RE.sub("", n).strip(" .,-&")
+    return " ".join(n.split()).title()
+
+
+def _looks_truncated(name: str) -> bool:
+    """R Wadiwala statements cut scrip names at ~30 chars, leaving fragments
+    like 'HIMACHAL FUTURISTIC COMMUNICAT' that an exact-phrase search misses."""
+    raw = str(name or "").strip()
+    if len(raw) >= 28:
+        return True
+    last = raw.split()[-1] if raw.split() else ""
+    return len(last) > 3 and last.upper() == last and not last.isalpha()
+
+
+def _parse_rss(xml_bytes: bytes, limit: int) -> list[dict]:
+    """Parse a Google News RSS payload into item dicts."""
+    items = []
+    try:
+        root = _ET.fromstring(xml_bytes)
+    except Exception:
+        return items
+
+    for node in root.iter("item"):
+        title = (node.findtext("title") or "").strip()
+        if not title or _NOISE_RE.search(title):
+            continue
+
+        src_el = node.find("source")
+        source = (src_el.text or "").strip() if src_el is not None else ""
+
+        # Google appends " - Publisher" to titles; drop it (shown separately)
+        if source and title.endswith(f" - {source}"):
+            title = title[: -(len(source) + 3)].strip()
+        else:
+            title = re.sub(r"\s+-\s+[^-]{3,40}$", "", title).strip()
+
+        published = None
+        raw_date = (node.findtext("pubDate") or "").strip()
+        if raw_date:
+            try:
+                published = _parse_rfc822(raw_date)
+                if published.tzinfo is None:
+                    published = published.replace(tzinfo=timezone.utc)
+            except Exception:
+                published = None
+
+        items.append({
+            "title": title,
+            "link": (node.findtext("link") or "").strip(),
+            "source": source,
+            "published": published,
+        })
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _google_news(query: str, limit: int, days: int) -> list[dict]:
+    url = ("https://news.google.com/rss/search?q="
+           + _qp(f"{query} when:{days}d") + "&hl=en-IN&gl=IN&ceid=IN:en")
+    try:
+        resp = requests.get(url, headers=_NEWS_HEADERS, timeout=12)
+    except Exception:
+        return []
+    if resp.status_code != 200:
+        return []
+    return _parse_rss(resp.content, limit)
+
+
+@st.cache_data(ttl=NEWS_TTL, show_spinner=False)
+def fetch_stock_news(scrip_name: str, ticker: str = "",
+                     limit: int = 5, days: int = 21) -> list[dict]:
+    """Latest headlines for one company.
+
+    Exact-phrase search is precise for complete names, but returns nothing for
+    the truncated names R Wadiwala statements produce — so fall back to an
+    unquoted search (and finally the ticker) when the phrase search comes up
+    short.
+    """
+    name = clean_company_name(scrip_name)
+    if not name:
+        return []
+
+    results: list[dict] = []
+    seen: set[str] = set()
+
+    def _add(items):
+        for it in items:
+            key = it["title"].lower()[:70]
+            if key not in seen:
+                seen.add(key)
+                results.append(it)
+
+    if not _looks_truncated(scrip_name):
+        _add(_google_news(f'"{name}"', limit, days))
+
+    if len(results) < limit:
+        _add(_google_news(f"{name} stock", limit, days))
+
+    if len(results) < 2 and ticker:
+        tk = str(ticker).replace(".NS", "").replace(".BO", "").strip()
+        if tk and tk.upper() != "LIQUIDCASE":
+            _add(_google_news(f"{tk} share NSE", limit, days))
+
+    results.sort(key=lambda x: x["published"] or datetime.min.replace(tzinfo=timezone.utc),
+                 reverse=True)
+    return results[:limit]
+
+
+def news_time_ago(dt) -> str:
+    """Human-friendly age for a published timestamp."""
+    if not dt:
+        return ""
+    try:
+        secs = (datetime.now(timezone.utc) - dt).total_seconds()
+    except Exception:
+        return ""
+    if secs < 0:
+        return "just now"
+    if secs < 3600:
+        return f"{int(secs // 60)}m ago"
+    if secs < 86400:
+        return f"{int(secs // 3600)}h ago"
+    days = int(secs // 86400)
+    if days < 30:
+        return f"{days}d ago"
+    return dt.strftime("%d %b %Y")
