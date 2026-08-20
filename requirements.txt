@@ -13,4 +13,6 @@ plotly>=5.18.0
 pyxirr>=0.9.0
 psycopg2-binary>=2.9.9
 openpyxl>=3.1.0
-requests>=2.31.0
+# `requests` also powers the news feed (Google News RSS, parsed with the
+# stdlib xml module — deliberately no feedparser/lxml, see finance.py).
+requests>=2.32.0

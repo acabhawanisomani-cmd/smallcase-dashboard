@@ -2427,6 +2427,34 @@ def render_smallcase(sc: dict):
 
 # ── News ────────────────────────────────────────────────────────────────────
 
+def _news_available() -> bool:
+    """Streamlit Cloud sometimes serves a stale finance.py after a deploy, so
+    the newest helpers are missing until the environment is rebuilt. Detect
+    that instead of crashing with a bare AttributeError."""
+    return hasattr(fin, "fetch_stock_news")
+
+
+def _news_unavailable_notice():
+    st.error("📰 News module not loaded yet.")
+    st.markdown(
+        "The app is running a cached copy of `finance.py` from before the news "
+        "feature was added. This clears itself once Streamlit Cloud rebuilds "
+        "the environment — usually a minute or two after a deploy.\n\n"
+        "If it persists, open **Manage app → ⋮ → Reboot app**."
+    )
+
+
+def _clear_news_cache():
+    """Clear cached headlines, tolerating a stale module."""
+    try:
+        fin.fetch_stock_news.clear()
+    except Exception:
+        try:
+            st.cache_data.clear()
+        except Exception:
+            pass
+
+
 def _news_block(scrip_name: str, items: list, badge: str = ""):
     """Render one company's headlines as a compact card."""
     tag = (f"<span style='font-size:10px;color:#8899a6;border:1px solid rgba(255,255,255,.12);"
@@ -2480,6 +2508,10 @@ def render_news_page():
         "to open the full article."
     )
 
+    if not _news_available():
+        _news_unavailable_notice()
+        return
+
     if not all_sc:
         st.info("Add a folio first — news is built from your holdings.")
         return
@@ -2514,7 +2546,7 @@ def render_news_page():
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button("🔄 Refresh", key="news_refresh",
                      help="Clear the 6-hour cache and pull fresh headlines"):
-            fin.fetch_stock_news.clear()
+            _clear_news_cache()
             st.rerun()
 
     pairs = [
@@ -2540,13 +2572,17 @@ def render_news_page():
 def _render_folio_news(sc: dict, sc_id: int, holdings: pd.DataFrame):
     """News panel inside a folio, scoped to that folio's holdings."""
     with st.container(border=True):
+        if not _news_available():
+            _news_unavailable_notice()
+            return
+
         top, right = st.columns([3, 1])
         with top:
             st.markdown(f"**Latest news for {sc['name']} holdings**")
         with right:
             if st.button("🔄 Refresh", key=f"news_ref_{sc_id}",
                          use_container_width=True):
-                fin.fetch_stock_news.clear()
+                _clear_news_cache()
                 st.rerun()
 
         pairs = [
