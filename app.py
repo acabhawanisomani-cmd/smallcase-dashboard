@@ -740,6 +740,8 @@ _nav_btn("🏠 Master Dashboard", "nav_master")
 _nav_btn("📊 Mutual Funds", "nav_mf")
 # News across every folio's holdings
 _nav_btn("📰 News", "nav_news")
+# Advisory clients — mandates, deployment and valuation
+_nav_btn("👥 Clients", "nav_clients")
 
 # Group folios by group_name
 _groups: dict[str, list] = {}
@@ -2599,6 +2601,608 @@ def _render_folio_news(sc: dict, sc_id: int, holdings: pd.DataFrame):
             _news_block(name, items)
 
 
+# ── Advisory Clients ────────────────────────────────────────────────────────
+
+def _clients_available() -> bool:
+    """Guard against Streamlit Cloud serving a database.py from before the
+    client tables existed (same stale-module race as the news feature)."""
+    return hasattr(db, "get_all_clients")
+
+
+def build_client_table(holdings: pd.DataFrame) -> pd.DataFrame:
+    """Priced holdings table for one client."""
+    if holdings.empty:
+        return pd.DataFrame()
+
+    live = fin.fetch_live_data(holdings["ticker"].tolist())
+    rows = []
+    for _, h in holdings.iterrows():
+        ld = live.get(h["ticker"], fin._empty_quote())
+        cur_price = ld["current_price"] if ld["current_price"] > 0 else h["buy_price"]
+        units, bp = float(h["units"]), float(h["buy_price"])
+        invested = round(units * bp, 2)
+        mkt = round(units * cur_price, 2)
+        pnl = round(mkt - invested, 2)
+        rows.append({
+            "ID": h["id"],
+            "Scrip Name": h["scrip_name"],
+            "Ticker": h["ticker"],
+            "Units": units,
+            "Buy Price": bp,
+            "Current Price": cur_price,
+            "Invested": invested,
+            "Market Value": mkt,
+            "P/L": pnl,
+            "P/L %": round(pnl / invested * 100, 2) if invested > 0 else 0.0,
+            "% Chg": ld["pct_change"],
+            "Buy Date": h["buy_date"] or "",
+        })
+    return pd.DataFrame(rows)
+
+
+def _client_totals(client: dict) -> dict:
+    """Mandate / invested / market value / P-L / idle cash for one client."""
+    h = db.get_client_holdings(client["id"])
+    t = build_client_table(h)
+    invested = float(t["Invested"].sum()) if not t.empty else 0.0
+    mkt = float(t["Market Value"].sum()) if not t.empty else 0.0
+    mandate = float(client.get("mandate_amount") or 0)
+    pnl = mkt - invested
+    return {
+        "table": t,
+        "mandate": mandate,
+        "invested": invested,
+        "market_value": mkt,
+        "pnl": pnl,
+        "pnl_pct": round(pnl / invested * 100, 2) if invested > 0 else 0.0,
+        "idle_cash": mandate - invested,
+        "deployed_pct": round(invested / mandate * 100, 2) if mandate > 0 else 0.0,
+        "stocks": 0 if t.empty else len(t),
+    }
+
+
+def build_client_excel(client: dict, table: pd.DataFrame, totals: dict) -> bytes | None:
+    """Professional single-sheet client statement."""
+    try:
+        from openpyxl.styles import Font, PatternFill, Alignment
+        from openpyxl.utils import get_column_letter
+    except Exception:
+        return None
+
+    cols = ["Scrip Name", "Ticker", "Units", "Buy Price", "Current Price",
+            "Invested", "Market Value", "P/L", "P/L %"]
+    cols = [c for c in cols if c in table.columns]
+    df = table[cols].copy() if not table.empty else pd.DataFrame(columns=cols)
+
+    summary = {
+        "Mandated Amount": round(totals["mandate"], 2),
+        "Amount Invested": round(totals["invested"], 2),
+        "Un-deployed Cash": round(totals["idle_cash"], 2),
+        "Deployed %": round(totals["deployed_pct"], 2),
+        "Current Market Value": round(totals["market_value"], 2),
+        "Unrealised P/L": round(totals["pnl"], 2),
+        "Return %": round(totals["pnl_pct"], 2),
+        "No. of Stocks": totals["stocks"],
+    }
+
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        start = len(summary) + 4
+        df.to_excel(writer, index=False, sheet_name="Statement", startrow=start)
+        ws = writer.sheets["Statement"]
+
+        ws.cell(row=1, column=1, value=f"{client['name']} — Portfolio Statement").font = \
+            Font(bold=True, size=14, color="B8860B")
+        sub = f"As on {datetime.now().strftime('%d %b %Y, %I:%M %p')}"
+        if client.get("code"):
+            sub = f"Client Code: {client['code']}   |   " + sub
+        ws.cell(row=2, column=1, value=sub).font = Font(size=9, italic=True, color="808080")
+
+        for i, (k, v) in enumerate(summary.items()):
+            r = 4 + i
+            ws.cell(row=r, column=1, value=k).font = Font(bold=True)
+            c = ws.cell(row=r, column=2, value=v)
+            c.number_format = '0.00"%"' if "%" in k else '#,##0.00'
+
+        hdr = start + 1
+        fill = PatternFill("solid", fgColor="1F3864")
+        for ci in range(1, len(cols) + 1):
+            cell = ws.cell(row=hdr, column=ci)
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = fill
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+        money, pct = '#,##0.00', '0.00"%"'
+        fmts = {"Units": '#,##0.00', "Buy Price": money, "Current Price": money,
+                "Invested": money, "Market Value": money, "P/L": money, "P/L %": pct}
+        for ci, name in enumerate(cols, start=1):
+            for r in range(hdr + 1, hdr + 1 + len(df)):
+                cell = ws.cell(row=r, column=ci)
+                if name in fmts:
+                    cell.number_format = fmts[name]
+                if name in ("P/L", "P/L %") and isinstance(cell.value, (int, float)):
+                    cell.font = Font(color="008000" if cell.value >= 0 else "CC0000")
+
+        if len(df):
+            tot = hdr + len(df) + 1
+            ws.cell(row=tot, column=1, value="TOTAL").font = Font(bold=True)
+            for ci, name in enumerate(cols, start=1):
+                if name in ("Invested", "Market Value", "P/L"):
+                    L = get_column_letter(ci)
+                    c = ws.cell(row=tot, column=ci,
+                                value=f"=SUM({L}{hdr+1}:{L}{hdr+len(df)})")
+                    c.font = Font(bold=True)
+                    c.number_format = money
+
+        for ci, name in enumerate(cols, start=1):
+            longest = max([len(str(name))] +
+                          [len(str(v)) for v in (df[name].tolist() if len(df) else [])] or [10])
+            ws.column_dimensions[get_column_letter(ci)].width = min(max(longest + 2, 12), 34)
+        ws.column_dimensions["A"].width = max(ws.column_dimensions["A"].width or 12, 22)
+        ws.freeze_panes = ws.cell(row=hdr + 1, column=1)
+
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def render_clients():
+    st.title("👥 Advisory Clients")
+    st.caption(f"Client mandates, deployment and live valuation · "
+               f"{datetime.now().strftime('%d %b %Y, %I:%M %p')}")
+
+    if not _clients_available():
+        st.error("👥 Client module not loaded yet.")
+        st.markdown(
+            "The app is running a cached copy of `database.py` from before the "
+            "client tables were added. It clears once Streamlit Cloud finishes "
+            "rebuilding — usually a minute or two after a deploy.\n\n"
+            "If it persists, open **Manage app → ⋮ → Reboot app**."
+        )
+        return
+
+    try:
+        clients = db.get_all_clients()
+    except Exception as e:
+        st.error(f"Could not load clients: {e}")
+        return
+
+    # ── Add a client ────────────────────────────────────────────────────────
+    with st.expander("➕ Add Client", expanded=not clients):
+        with st.form("add_client_form"):
+            a1, a2, a3 = st.columns([3, 1, 2])
+            with a1:
+                cname = st.text_input("Client Name *", placeholder="e.g. Bajaj Hemant Vasudev (HUF)")
+            with a2:
+                ccode = st.text_input("Client Code", placeholder="R27072")
+            with a3:
+                cmandate = st.number_input("Mandated Amount (₹)", min_value=0.0,
+                                           step=50000.0, value=0.0)
+            cnotes = st.text_input("Notes", placeholder="Optional — strategy, mandate terms, etc.")
+            if st.form_submit_button("Add Client", type="primary"):
+                if not cname.strip():
+                    st.error("Client name is required.")
+                else:
+                    db.add_client(cname.strip(), cmandate, ccode.strip(), cnotes.strip())
+                    st.success(f"Added client: {cname.strip()}")
+                    st.rerun()
+
+    if not clients:
+        st.info("No clients yet — add your first client above.")
+        return
+
+    # ── Aggregate across all clients ────────────────────────────────────────
+    all_tot = {c["id"]: _client_totals(c) for c in clients}
+    g_mandate = sum(t["mandate"] for t in all_tot.values())
+    g_invested = sum(t["invested"] for t in all_tot.values())
+    g_mkt = sum(t["market_value"] for t in all_tot.values())
+    g_pnl = g_mkt - g_invested
+    g_pct = round(g_pnl / g_invested * 100, 2) if g_invested > 0 else 0.0
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    with m1:
+        metric_card("Total Mandate", format_inr(g_mandate))
+    with m2:
+        metric_card("Deployed", format_inr(g_invested))
+    with m3:
+        metric_card("Market Value", format_inr(g_mkt),
+                    "profit" if g_mkt >= g_invested else "loss")
+    with m4:
+        metric_card("Unrealised P/L", f"{format_inr(g_pnl)} ({g_pct:+.2f}%)",
+                    "profit" if g_pnl >= 0 else "loss")
+    with m5:
+        metric_card("Un-deployed Cash", format_inr(g_mandate - g_invested),
+                    "neutral" if g_mandate >= g_invested else "loss")
+
+    st.markdown("---")
+
+    names = [c["name"] for c in clients]
+    view = st.selectbox("View", ["📋 All Clients"] + names, key="client_view")
+
+    # ── Roster ──────────────────────────────────────────────────────────────
+    if view == "📋 All Clients":
+        st.subheader("Client Roster")
+        rows = []
+        for c in clients:
+            t = all_tot[c["id"]]
+            rows.append({
+                "Client": c["name"],
+                "Code": c.get("code") or "—",
+                "Mandate": t["mandate"],
+                "Invested": t["invested"],
+                "Deployed %": t["deployed_pct"],
+                "Idle Cash": t["idle_cash"],
+                "Market Value": t["market_value"],
+                "P/L": t["pnl"],
+                "P/L %": t["pnl_pct"],
+                "Stocks": t["stocks"],
+            })
+        rdf = pd.DataFrame(rows)
+        st.dataframe(
+            rdf.style
+               .map(color_pnl, subset=["P/L", "P/L %"])
+               .format({"Mandate": "₹{:,.0f}", "Invested": "₹{:,.0f}",
+                        "Idle Cash": "₹{:,.0f}", "Market Value": "₹{:,.0f}",
+                        "P/L": "₹{:,.0f}", "P/L %": "{:+.2f}%",
+                        "Deployed %": "{:.1f}%"}),
+            width="stretch", hide_index=True,
+            column_config={
+                "Deployed %": st.column_config.ProgressColumn(
+                    "Deployed %", min_value=0, max_value=100, format="%.1f%%",
+                    help="Share of the mandate actually invested"),
+            },
+        )
+
+        cc1, cc2 = st.columns(2)
+        with cc1:
+            st.markdown("**Mandate vs Deployed**")
+            fig = go.Figure()
+            fig.add_trace(go.Bar(name="Mandate", x=rdf["Client"], y=rdf["Mandate"],
+                                 marker_color="#37474f"))
+            fig.add_trace(go.Bar(name="Invested", x=rdf["Client"], y=rdf["Invested"],
+                                 marker_color="#5c6bc0"))
+            fig.add_trace(go.Bar(name="Market Value", x=rdf["Client"], y=rdf["Market Value"],
+                                 marker_color="#26a69a"))
+            fig.update_layout(**_CHART_LAYOUT, barmode="group", height=330,
+                              legend=dict(orientation="h", y=-0.18),
+                              yaxis=dict(gridcolor="#2d2d44"))
+            st.plotly_chart(fig, use_container_width=True)
+        with cc2:
+            st.markdown("**P/L by Client**")
+            d = rdf.sort_values("P/L")
+            fig = go.Figure(go.Bar(
+                x=d["P/L"], y=d["Client"], orientation="h",
+                marker_color=["#ff5252" if v < 0 else "#00e676" for v in d["P/L"]],
+                hovertemplate="%{y}<br>₹%{x:,.0f}<extra></extra>"))
+            fig.update_layout(**_CHART_LAYOUT, height=330,
+                              xaxis=dict(title="P/L (₹)", gridcolor="#2d2d44",
+                                         zerolinecolor="#4a4a6a"),
+                              yaxis=dict(showgrid=False))
+            st.plotly_chart(fig, use_container_width=True)
+        return
+
+    # ── Single client detail ────────────────────────────────────────────────
+    client = next(c for c in clients if c["name"] == view)
+    cid = client["id"]
+    t = all_tot[cid]
+    table = t["table"]
+
+    _render_client_detail(client, cid, t, table)
+
+
+def _render_client_detail(client: dict, cid: int, t: dict, table: pd.DataFrame):
+    head_l, head_r = st.columns([3, 2])
+    with head_l:
+        st.subheader(client["name"])
+        bits = []
+        if client.get("code"):
+            bits.append(f"Code **{client['code']}**")
+        if client.get("notes"):
+            bits.append(client["notes"])
+        if bits:
+            st.caption(" · ".join(bits))
+    with head_r:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if t["mandate"] > 0:
+            pct = min(t["deployed_pct"] / 100, 1.0)
+            st.progress(pct, text=f"Deployed {t['deployed_pct']:.1f}% of mandate")
+
+    d1, d2, d3, d4, d5 = st.columns(5)
+    with d1:
+        metric_card("Mandate", format_inr(t["mandate"]))
+    with d2:
+        metric_card("Invested", format_inr(t["invested"]))
+    with d3:
+        metric_card("Market Value", format_inr(t["market_value"]),
+                    "profit" if t["market_value"] >= t["invested"] else "loss")
+    with d4:
+        metric_card("Unrealised P/L", f"{format_inr(t['pnl'])} ({t['pnl_pct']:+.2f}%)",
+                    "profit" if t["pnl"] >= 0 else "loss")
+    with d5:
+        metric_card("Idle Cash", format_inr(t["idle_cash"]),
+                    "loss" if t["idle_cash"] < 0 else "neutral")
+
+    if t["idle_cash"] < 0:
+        st.warning(f"⚠️ Invested amount exceeds the mandate by "
+                   f"{format_inr(abs(t['idle_cash']))}.")
+
+    # ── Action bar ──────────────────────────────────────────────────────────
+    pkey = f"cl_panel_{cid}"
+    active = st.session_state.get(pkey)
+
+    def _cbtn(label, name, col, help_text):
+        with col:
+            if st.button(label, key=f"cl_{name}_{cid}", use_container_width=True,
+                         type="primary" if active == name else "secondary",
+                         help=help_text):
+                st.session_state[pkey] = None if active == name else name
+                st.rerun()
+
+    b = st.columns(4)
+    _cbtn("➕ Add Stock", "add", b[0], "Add a holding for this client")
+    _cbtn("📥 Copy from Folio", "copy", b[1],
+          "Replicate an existing folio's stocks for this client, scaled to the mandate")
+    _cbtn("⚙️ Client Settings", "settings", b[2], "Edit mandate, code, notes — or remove the client")
+    _cbtn("📄 Statement", "stmt", b[3], "Download a formatted statement")
+
+    if active == "add":
+        _client_add_stock(cid)
+    elif active == "copy":
+        _client_copy_folio(cid, t)
+    elif active == "settings":
+        _client_settings(client, cid)
+    elif active == "stmt":
+        _client_statement(client, table, t)
+
+    # ── Holdings ────────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("Holdings")
+    if table.empty:
+        st.info("No stocks yet — use **➕ Add Stock** or **📥 Copy from Folio** above.")
+        return
+
+    show = table.drop(columns=["ID"])
+    st.dataframe(
+        show.style
+            .map(color_pnl, subset=["P/L", "P/L %", "% Chg"])
+            .format({"Units": "{:,.2f}", "Buy Price": "₹{:,.2f}",
+                     "Current Price": "₹{:,.2f}", "Invested": "₹{:,.0f}",
+                     "Market Value": "₹{:,.0f}", "P/L": "₹{:,.0f}",
+                     "P/L %": "{:+.2f}%", "% Chg": "{:+.2f}%"}),
+        width="stretch", hide_index=True,
+        height=min(520, 50 + 35 * len(show)),
+    )
+
+    ch1, ch2 = st.columns(2)
+    with ch1:
+        st.markdown("**Allocation**")
+        fig = px.pie(table, names="Scrip Name", values="Market Value", hole=0.45,
+                     color_discrete_sequence=px.colors.qualitative.Set3)
+        fig.update_traces(textposition="inside", textinfo="percent")
+        fig.update_layout(**_CHART_LAYOUT, height=330,
+                          legend=dict(font=dict(size=9), orientation="h", y=-0.12))
+        st.plotly_chart(fig, use_container_width=True)
+    with ch2:
+        st.markdown("**P/L by Stock**")
+        d = table.sort_values("P/L")
+        fig = go.Figure(go.Bar(
+            x=d["P/L"], y=d["Scrip Name"], orientation="h",
+            marker_color=["#ff5252" if v < 0 else "#00e676" for v in d["P/L"]],
+            hovertemplate="%{y}<br>₹%{x:,.0f}<extra></extra>"))
+        fig.update_layout(**_CHART_LAYOUT, height=max(280, 26 * len(d)),
+                          xaxis=dict(title="P/L (₹)", gridcolor="#2d2d44",
+                                     zerolinecolor="#4a4a6a"),
+                          yaxis=dict(showgrid=False))
+        st.plotly_chart(fig, use_container_width=True)
+
+    # ── Manage individual holdings ──────────────────────────────────────────
+    with st.expander("✏️ Edit / Remove Holdings", expanded=False):
+        opts = {f"{r['Scrip Name']} ({r['Ticker']})": int(r["ID"])
+                for _, r in table.iterrows()}
+        sel = st.selectbox("Select holding", list(opts.keys()), key=f"cl_edit_sel_{cid}")
+        hid = opts[sel]
+        cur_row = table[table["ID"] == hid].iloc[0]
+        e1, e2, e3 = st.columns(3)
+        with e1:
+            n_units = st.number_input("Units", min_value=0.0, step=1.0,
+                                      value=float(cur_row["Units"]), key=f"cl_u_{cid}_{hid}")
+        with e2:
+            n_price = st.number_input("Buy Price (₹)", min_value=0.0, step=0.5,
+                                      value=float(cur_row["Buy Price"]), key=f"cl_p_{cid}_{hid}")
+        with e3:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("💾 Save", key=f"cl_save_{cid}_{hid}", use_container_width=True):
+                db.update_client_holding(hid, units=n_units, buy_price=n_price)
+                st.success("Updated.")
+                st.rerun()
+        if st.button("🗑️ Remove this holding", key=f"cl_del_{cid}_{hid}"):
+            db.delete_client_holding(hid)
+            st.success("Removed.")
+            st.rerun()
+
+
+def _client_add_stock(cid: int):
+    with st.container(border=True):
+        lk = f"cl_lookup_{cid}"
+        l1, l2 = st.columns([3, 1])
+        with l1:
+            tick = st.text_input("Ticker (e.g. RELIANCE, TCS)", key=f"cl_tk_{cid}")
+        with l2:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("🔍 Lookup", key=f"cl_lk_{cid}") and tick.strip():
+                info = fin.fetch_stock_info(tick.strip())
+                st.session_state[lk] = {"ticker": tick.strip().upper(),
+                                        "name": info.get("long_name", tick.strip().upper())}
+        found = st.session_state.get(lk, {})
+        if found:
+            st.success(f"Found: **{found['name']}**")
+
+        with st.form(f"cl_add_form_{cid}"):
+            f1, f2, f3 = st.columns(3)
+            with f1:
+                nm = st.text_input("Scrip Name", value=found.get("name", ""))
+            with f2:
+                qty = st.number_input("Quantity", min_value=0.0, step=1.0)
+            with f3:
+                bp = st.number_input("Buy Price (₹)", min_value=0.0, step=0.5)
+            bdate = st.date_input("Buy Date", value=date.today(), key=f"cl_bd_{cid}")
+            if st.form_submit_button("Add Holding", type="primary"):
+                tk = (tick or found.get("ticker", "")).strip().upper()
+                if not tk or qty <= 0 or bp <= 0:
+                    st.error("Ticker, quantity and buy price are all required.")
+                else:
+                    db.add_client_holding(cid, tk, nm.strip() or tk, qty, bp,
+                                          bdate.strftime("%Y-%m-%d"))
+                    st.session_state.pop(lk, None)
+                    st.success(f"Added {tk} — {qty:,.2f} units @ ₹{bp:,.2f}")
+                    st.rerun()
+
+
+def _client_copy_folio(cid: int, t: dict):
+    """Replicate a folio's stocks for this client, scaled to a chosen amount."""
+    with st.container(border=True):
+        st.markdown("Replicate an existing folio's stocks for this client. "
+                    "Quantities are scaled to the amount you deploy, using each "
+                    "stock's weight in that folio and its current market price.")
+        if not all_sc:
+            st.info("No folios available to copy from.")
+            return
+
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            fname = st.selectbox("Source folio", [s["name"] for s in all_sc],
+                                 key=f"cl_srcf_{cid}")
+        with c2:
+            default_amt = t["idle_cash"] if t["idle_cash"] > 0 else t["mandate"]
+            deploy = st.number_input("Amount to deploy (₹)", min_value=0.0, step=10000.0,
+                                     value=float(max(default_amt, 0.0)),
+                                     key=f"cl_amt_{cid}")
+
+        src = next(s for s in all_sc if s["name"] == fname)
+        sh = db.get_holdings(src["id"])
+        if sh.empty:
+            st.info("That folio has no holdings.")
+            return
+
+        src_tbl = build_holdings_table(sh, float(src["total_investable_amount"] or 0))
+        if src_tbl.empty:
+            st.info("Could not price that folio.")
+            return
+
+        wt_total = float(src_tbl["Weightage %"].sum()) or 100.0
+        prev = []
+        for _, r in src_tbl.iterrows():
+            if str(r["Ticker"]).upper() == db.RESIDUAL_TICKER:
+                continue
+            share = float(r["Weightage %"]) / wt_total
+            alloc = deploy * share
+            price = float(r["Current Price"]) or float(r["Buy Price"])
+            qty = int(alloc // price) if price > 0 else 0
+            prev.append({"Include": qty > 0, "Scrip Name": r["Scrip Name"],
+                         "Ticker": r["Ticker"], "Weight %": round(share * 100, 2),
+                         "Price": price, "Qty": qty, "Amount": round(qty * price, 2)})
+
+        if not prev:
+            st.info("Nothing to copy.")
+            return
+
+        pdf = pd.DataFrame(prev)
+        edited = st.data_editor(
+            pdf, hide_index=True, width="stretch", key=f"cl_prev_{cid}",
+            column_config={
+                "Include": st.column_config.CheckboxColumn("Include", width="small"),
+                "Scrip Name": st.column_config.TextColumn(disabled=True, width="large"),
+                "Ticker": st.column_config.TextColumn(disabled=True, width="small"),
+                "Weight %": st.column_config.NumberColumn(disabled=True, format="%.2f%%"),
+                "Price": st.column_config.NumberColumn(disabled=True, format="₹%.2f"),
+                "Qty": st.column_config.NumberColumn("Qty", format="%d",
+                                                     help="Editable — adjust as needed"),
+                "Amount": st.column_config.NumberColumn(disabled=True, format="₹%.2f"),
+            },
+        )
+        take = edited[edited["Include"] & (edited["Qty"] > 0)]
+        total = float((take["Qty"] * take["Price"]).sum()) if not take.empty else 0.0
+        st.caption(f"{len(take)} stock(s) · deploying **₹{total:,.2f}** "
+                   f"of ₹{deploy:,.2f} · residual ₹{deploy - total:,.2f}")
+
+        if st.button("✅ Add these to client", key=f"cl_docopy_{cid}",
+                     type="primary", disabled=take.empty):
+            for _, r in take.iterrows():
+                db.add_client_holding(cid, str(r["Ticker"]).upper(), r["Scrip Name"],
+                                      float(r["Qty"]), float(r["Price"]),
+                                      date.today().strftime("%Y-%m-%d"))
+            st.success(f"Added {len(take)} holdings from {fname}.")
+            st.rerun()
+
+
+def _client_settings(client: dict, cid: int):
+    with st.container(border=True):
+        with st.form(f"cl_set_{cid}"):
+            s1, s2, s3 = st.columns([3, 1, 2])
+            with s1:
+                nm = st.text_input("Client Name", value=client["name"])
+            with s2:
+                cd = st.text_input("Code", value=client.get("code") or "")
+            with s3:
+                md = st.number_input("Mandated Amount (₹)", min_value=0.0, step=50000.0,
+                                     value=float(client.get("mandate_amount") or 0))
+            nt = st.text_input("Notes", value=client.get("notes") or "")
+            if st.form_submit_button("💾 Save Changes", type="primary"):
+                db.update_client(cid, name=nm.strip(), code=cd.strip(),
+                                 mandate_amount=md, notes=nt.strip())
+                st.success("Client updated.")
+                st.rerun()
+
+        ck = f"cl_confirm_del_{cid}"
+        if st.session_state.get(ck):
+            st.warning(f"Delete **{client['name']}** and all their holdings?")
+            y, n = st.columns(2)
+            if y.button("✅ Yes, delete", key=f"cl_dy_{cid}", type="primary"):
+                db.delete_client(cid)
+                st.session_state.pop(ck, None)
+                st.session_state.pop("client_view", None)
+                st.success("Client deleted.")
+                st.rerun()
+            if n.button("✖ Cancel", key=f"cl_dn_{cid}"):
+                st.session_state.pop(ck, None)
+                st.rerun()
+        else:
+            if st.button("🗑️ Delete Client", key=f"cl_delc_{cid}",
+                         help="Removes the client and every holding recorded for them"):
+                st.session_state[ck] = True
+                st.rerun()
+
+
+def _client_statement(client: dict, table: pd.DataFrame, t: dict):
+    with st.container(border=True):
+        st.markdown(f"### {client['name']} — Portfolio Statement")
+        cap = f"As on {datetime.now().strftime('%d %b %Y, %I:%M %p')}"
+        if client.get("code"):
+            cap = f"Client Code **{client['code']}** · " + cap
+        st.caption(cap)
+
+        q1, q2, q3, q4 = st.columns(4)
+        q1.metric("Mandate", format_inr(t["mandate"]))
+        q2.metric("Invested", format_inr(t["invested"]))
+        q3.metric("Market Value", format_inr(t["market_value"]))
+        q4.metric("Unrealised P/L", format_inr(t["pnl"]), f"{t['pnl_pct']:+.2f}%")
+
+        stamp = datetime.now().strftime("%Y%m%d")
+        safe = "".join(ch if ch.isalnum() else "_" for ch in client["name"])
+        xls = build_client_excel(client, table, t)
+        if xls:
+            st.download_button("⬇️ Download Client Statement (Excel)", data=xls,
+                               file_name=f"{safe}_statement_{stamp}.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument."
+                                    "spreadsheetml.sheet",
+                               key=f"cl_xls_{client['id']}")
+        elif not table.empty:
+            st.download_button("⬇️ Download Client Statement (CSV)",
+                               data=table.drop(columns=["ID"]).to_csv(index=False).encode(),
+                               file_name=f"{safe}_statement_{stamp}.csv",
+                               mime="text/csv", key=f"cl_csv_{client['id']}")
+        st.caption("Tip: Ctrl+P on this page prints a clean PDF.")
+
+
 # ── Mutual Fund Dashboard ────────────────────────────────────────────────────
 
 def render_mutual_funds():
@@ -2837,6 +3441,8 @@ elif nav == "📊 Mutual Funds":
     render_mutual_funds()
 elif nav == "📰 News":
     render_news_page()
+elif nav == "👥 Clients":
+    render_clients()
 else:
     # Find the matching smallcase
     for sc in all_sc:

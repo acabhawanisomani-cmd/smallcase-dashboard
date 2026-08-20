@@ -232,6 +232,65 @@ def init_db():
             )
         """)
 
+    # ── Advisory clients ────────────────────────────────────────────────────
+    # A client has a mandate (capital we're authorised to deploy) and their own
+    # holdings, so undeployed cash is meaningful — unlike a folio, which is
+    # weight-based.
+    if _USE_PG:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS clients (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                code TEXT DEFAULT '',
+                mandate_amount DOUBLE PRECISION DEFAULT 0,
+                notes TEXT DEFAULT '',
+                is_active INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS client_holdings (
+                id SERIAL PRIMARY KEY,
+                client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+                ticker TEXT NOT NULL,
+                scrip_name TEXT NOT NULL,
+                units DOUBLE PRECISION DEFAULT 0,
+                buy_price DOUBLE PRECISION DEFAULT 0,
+                buy_date TEXT,
+                notes TEXT DEFAULT '',
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+    else:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS clients (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                code TEXT DEFAULT '',
+                mandate_amount REAL DEFAULT 0,
+                notes TEXT DEFAULT '',
+                is_active INTEGER DEFAULT 1,
+                created_at TEXT DEFAULT (datetime('now','localtime')),
+                updated_at TEXT DEFAULT (datetime('now','localtime'))
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS client_holdings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+                ticker TEXT NOT NULL,
+                scrip_name TEXT NOT NULL,
+                units REAL DEFAULT 0,
+                buy_price REAL DEFAULT 0,
+                buy_date TEXT,
+                notes TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now','localtime')),
+                updated_at TEXT DEFAULT (datetime('now','localtime'))
+            )
+        """)
+
     # ── Migrations: add columns that didn't exist in older schema ──
     try:
         if _USE_PG:
@@ -745,6 +804,120 @@ def update_mutual_fund(mf_id: int, **kwargs):
 def delete_mutual_fund(mf_id: int):
     conn = get_connection()
     conn.cursor().execute(f"DELETE FROM mutual_funds WHERE id = {_ph()}", (mf_id,))
+    conn.commit()
+    conn.close()
+
+
+# ── Advisory clients CRUD ───────────────────────────────────────────────────
+
+def get_all_clients(active_only: bool = True) -> list[dict]:
+    conn = get_connection()
+    cur = conn.cursor()
+    q = "SELECT * FROM clients"
+    if active_only:
+        q += " WHERE is_active = 1"
+    q += " ORDER BY name"
+    cur.execute(q)
+    rows = _fetchall_dict(cur)
+    conn.close()
+    return rows
+
+
+def get_client(client_id: int) -> dict | None:
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(f"SELECT * FROM clients WHERE id = {_ph()}", (client_id,))
+    row = _fetch_dict(cur)
+    conn.close()
+    return row
+
+
+def add_client(name: str, mandate_amount: float = 0, code: str = "",
+               notes: str = "") -> int:
+    conn = get_connection()
+    cur = conn.cursor()
+    cols = "(name, code, mandate_amount, notes)"
+    if _USE_PG:
+        cur.execute(f"INSERT INTO clients {cols} VALUES ({_ph(4)}) RETURNING id",
+                    (name, code, mandate_amount, notes))
+    else:
+        cur.execute(f"INSERT INTO clients {cols} VALUES ({_ph(4)})",
+                    (name, code, mandate_amount, notes))
+    cid = _last_id(cur, "clients")
+    conn.commit()
+    conn.close()
+    return cid
+
+
+def update_client(client_id: int, **kwargs):
+    if not kwargs:
+        return
+    conn = get_connection()
+    ph = _ph()
+    sets = ", ".join(f"{k} = {ph}" for k in kwargs)
+    vals = list(kwargs.values()) + [client_id]
+    conn.cursor().execute(
+        f"UPDATE clients SET {sets}, updated_at = {_now_expr()} WHERE id = {ph}", vals
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_client(client_id: int):
+    """Deletes the client and (via cascade) all their holdings."""
+    conn = get_connection()
+    cur = conn.cursor()
+    # SQLite needs the child rows removed explicitly unless FKs are enforced
+    cur.execute(f"DELETE FROM client_holdings WHERE client_id = {_ph()}", (client_id,))
+    cur.execute(f"DELETE FROM clients WHERE id = {_ph()}", (client_id,))
+    conn.commit()
+    conn.close()
+
+
+def get_client_holdings(client_id: int) -> pd.DataFrame:
+    conn = get_connection()
+    df = pd.read_sql_query(
+        f"SELECT * FROM client_holdings WHERE client_id = {_ph()} ORDER BY scrip_name",
+        conn, params=(client_id,),
+    )
+    conn.close()
+    return df
+
+
+def add_client_holding(client_id: int, ticker: str, scrip_name: str,
+                       units: float, buy_price: float, buy_date: str = "",
+                       notes: str = "") -> int:
+    conn = get_connection()
+    cur = conn.cursor()
+    cols = "(client_id, ticker, scrip_name, units, buy_price, buy_date, notes)"
+    args = (client_id, ticker, scrip_name, units, buy_price, buy_date, notes)
+    if _USE_PG:
+        cur.execute(f"INSERT INTO client_holdings {cols} VALUES ({_ph(7)}) RETURNING id", args)
+    else:
+        cur.execute(f"INSERT INTO client_holdings {cols} VALUES ({_ph(7)})", args)
+    hid = _last_id(cur, "client_holdings")
+    conn.commit()
+    conn.close()
+    return hid
+
+
+def update_client_holding(holding_id: int, **kwargs):
+    if not kwargs:
+        return
+    conn = get_connection()
+    ph = _ph()
+    sets = ", ".join(f"{k} = {ph}" for k in kwargs)
+    vals = list(kwargs.values()) + [holding_id]
+    conn.cursor().execute(
+        f"UPDATE client_holdings SET {sets}, updated_at = {_now_expr()} WHERE id = {ph}", vals
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_client_holding(holding_id: int):
+    conn = get_connection()
+    conn.cursor().execute(f"DELETE FROM client_holdings WHERE id = {_ph()}", (holding_id,))
     conn.commit()
     conn.close()
 

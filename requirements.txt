@@ -16,3 +16,7 @@ openpyxl>=3.1.0
 # `requests` also powers the news feed (Google News RSS, parsed with the
 # stdlib xml module — deliberately no feedparser/lxml, see finance.py).
 requests>=2.32.0
+# NOTE: touch this file whenever database.py/finance.py gain new functions.
+# Streamlit Cloud otherwise serves a cached module and every call to the new
+# helper fails with AttributeError until the environment is rebuilt.
+# Rebuild marker: clients+client_holdings tables (advisory clients)
