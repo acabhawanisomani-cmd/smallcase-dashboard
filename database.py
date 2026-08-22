@@ -327,6 +327,53 @@ def init_db():
             )
         """)
 
+    # ── Work tracker ────────────────────────────────────────────────────────
+    # Recurring tasks. Completion is recorded per period (a daily task done
+    # today is still pending tomorrow), so work_log holds one row per
+    # task+period rather than a single done flag on the task.
+    if _USE_PG:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS work_tasks (
+                id SERIAL PRIMARY KEY,
+                title TEXT NOT NULL,
+                frequency TEXT NOT NULL DEFAULT 'daily',
+                notes TEXT DEFAULT '',
+                is_active INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS work_log (
+                id SERIAL PRIMARY KEY,
+                task_id INTEGER NOT NULL REFERENCES work_tasks(id) ON DELETE CASCADE,
+                period_key TEXT NOT NULL,
+                done_at TIMESTAMP DEFAULT NOW(),
+                notes TEXT DEFAULT '',
+                UNIQUE (task_id, period_key)
+            )
+        """)
+    else:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS work_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                frequency TEXT NOT NULL DEFAULT 'daily',
+                notes TEXT DEFAULT '',
+                is_active INTEGER DEFAULT 1,
+                created_at TEXT DEFAULT (datetime('now','localtime'))
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS work_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL REFERENCES work_tasks(id) ON DELETE CASCADE,
+                period_key TEXT NOT NULL,
+                done_at TEXT DEFAULT (datetime('now','localtime')),
+                notes TEXT DEFAULT '',
+                UNIQUE (task_id, period_key)
+            )
+        """)
+
     # ── Scrip → NSE ticker memory ───────────────────────────────────────────
     # Broker statements carry scrip names but no tickers. Remember every
     # mapping the user confirms so repeat uploads need no re-typing.
@@ -1065,6 +1112,132 @@ def book_client_sale(client_id: int, holding_id: int, units_sold: float,
         raise
     conn.close()
     return rid
+
+
+# ── Work tracker CRUD ───────────────────────────────────────────────────────
+
+WORK_FREQUENCIES = ("daily", "weekly", "monthly")
+
+
+def get_work_tasks(active_only: bool = True) -> list[dict]:
+    conn = get_connection()
+    cur = conn.cursor()
+    q = "SELECT * FROM work_tasks"
+    if active_only:
+        q += " WHERE is_active = 1"
+    q += " ORDER BY frequency, id"
+    cur.execute(q)
+    rows = _fetchall_dict(cur)
+    conn.close()
+    return rows
+
+
+def add_work_task(title: str, frequency: str = "daily", notes: str = "") -> int:
+    freq = frequency if frequency in WORK_FREQUENCIES else "daily"
+    conn = get_connection()
+    cur = conn.cursor()
+    if _USE_PG:
+        cur.execute("INSERT INTO work_tasks (title, frequency, notes) "
+                    "VALUES (%s, %s, %s) RETURNING id", (title, freq, notes))
+    else:
+        cur.execute("INSERT INTO work_tasks (title, frequency, notes) "
+                    "VALUES (?, ?, ?)", (title, freq, notes))
+    tid = _last_id(cur, "work_tasks")
+    conn.commit()
+    conn.close()
+    return tid
+
+
+def update_work_task(task_id: int, **kwargs):
+    if not kwargs:
+        return
+    conn = get_connection()
+    ph = _ph()
+    sets = ", ".join(f"{k} = {ph}" for k in kwargs)
+    conn.cursor().execute(f"UPDATE work_tasks SET {sets} WHERE id = {ph}",
+                          list(kwargs.values()) + [task_id])
+    conn.commit()
+    conn.close()
+
+
+def delete_work_task(task_id: int):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(f"DELETE FROM work_log WHERE task_id = {_ph()}", (task_id,))
+    cur.execute(f"DELETE FROM work_tasks WHERE id = {_ph()}", (task_id,))
+    conn.commit()
+    conn.close()
+
+
+def mark_work_done(task_id: int, period_key: str, notes: str = ""):
+    """Idempotent — marking an already-completed period is a no-op."""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        if _USE_PG:
+            cur.execute(
+                "INSERT INTO work_log (task_id, period_key, notes) VALUES (%s, %s, %s) "
+                "ON CONFLICT (task_id, period_key) DO NOTHING",
+                (task_id, period_key, notes))
+        else:
+            cur.execute(
+                "INSERT OR IGNORE INTO work_log (task_id, period_key, notes) "
+                "VALUES (?, ?, ?)", (task_id, period_key, notes))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def unmark_work_done(task_id: int, period_key: str):
+    conn = get_connection()
+    ph = _ph()
+    conn.cursor().execute(
+        f"DELETE FROM work_log WHERE task_id = {ph} AND period_key = {ph}",
+        (task_id, period_key))
+    conn.commit()
+    conn.close()
+
+
+def get_done_periods(period_keys: list[str]) -> set:
+    """{(task_id, period_key)} already completed, for the given periods."""
+    if not period_keys:
+        return set()
+    conn = get_connection()
+    cur = conn.cursor()
+    marks = ", ".join([_ph()] * len(period_keys))
+    cur.execute(f"SELECT task_id, period_key FROM work_log "
+                f"WHERE period_key IN ({marks})", tuple(period_keys))
+    rows = cur.fetchall()
+    conn.close()
+    out = set()
+    for r in rows:
+        out.add((r[0], r[1]) if isinstance(r, tuple) else (r["task_id"], r["period_key"]))
+    return out
+
+
+def get_last_done(task_id: int) -> str | None:
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(f"SELECT period_key FROM work_log WHERE task_id = {_ph()} "
+                f"ORDER BY period_key DESC LIMIT 1", (task_id,))
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return row[0] if isinstance(row, tuple) else row["period_key"]
+
+
+def get_work_history(limit: int = 200) -> list[dict]:
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT l.id, l.task_id, l.period_key, l.done_at, l.notes, "
+        "t.title, t.frequency FROM work_log l "
+        "JOIN work_tasks t ON t.id = l.task_id "
+        "ORDER BY l.done_at DESC LIMIT " + str(int(limit)))
+    rows = _fetchall_dict(cur)
+    conn.close()
+    return rows
 
 
 def scrip_key(name: str) -> str:

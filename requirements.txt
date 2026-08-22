@@ -19,4 +19,4 @@ requests>=2.32.0
 # NOTE: touch this file whenever database.py/finance.py gain new functions.
 # Streamlit Cloud otherwise serves a cached module and every call to the new
 # helper fails with AttributeError until the environment is rebuilt.
-# Rebuild marker: client_realized table (realized gains ledger)
+# Rebuild marker: work_tasks + work_log tables (work tracker)

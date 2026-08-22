@@ -666,6 +666,297 @@ def build_holdings_table(holdings_df: pd.DataFrame, total_amount: float,
     return pd.DataFrame(rows)
 
 
+# ── Work Tracker ────────────────────────────────────────────────────────────
+
+WORK_LABEL = {"daily": "Daily", "weekly": "Weekly", "monthly": "Monthly"}
+WORK_ICON = {"daily": "📅", "weekly": "🗓️", "monthly": "📆"}
+
+
+def _work_available() -> bool:
+    return hasattr(db, "get_work_tasks")
+
+
+def period_key(freq: str, on: date | None = None) -> str:
+    """Identifier for the current period of a recurring task."""
+    d = on or date.today()
+    if freq == "weekly":
+        iso = d.isocalendar()
+        return f"{iso[0]}-W{iso[1]:02d}"
+    if freq == "monthly":
+        return d.strftime("%Y-%m")
+    return d.strftime("%Y-%m-%d")
+
+
+def period_label(freq: str, on: date | None = None) -> str:
+    """Human wording for the period a task is currently due in."""
+    d = on or date.today()
+    if freq == "weekly":
+        start = d - timedelta(days=d.weekday())
+        end = start + timedelta(days=6)
+        return f"week of {start.strftime('%d %b')} – {end.strftime('%d %b')}"
+    if freq == "monthly":
+        return d.strftime("%B %Y")
+    return d.strftime("%a, %d %b %Y")
+
+
+def _prev_period_key(freq: str, back: int, on: date | None = None) -> str:
+    d = on or date.today()
+    if freq == "weekly":
+        return period_key(freq, d - timedelta(weeks=back))
+    if freq == "monthly":
+        y, m = d.year, d.month - back
+        while m <= 0:
+            m += 12
+            y -= 1
+        return f"{y}-{m:02d}"
+    return period_key(freq, d - timedelta(days=back))
+
+
+def get_work_status(lookback: int = 3) -> dict:
+    """Current-period status for every active task, plus recently missed ones."""
+    try:
+        tasks = db.get_work_tasks()
+    except Exception:
+        return {"tasks": [], "pending": [], "done": [], "missed": []}
+
+    if not tasks:
+        return {"tasks": [], "pending": [], "done": [], "missed": []}
+
+    # Every period we care about: current + a few previous, per frequency
+    keys = set()
+    for t in tasks:
+        f = t["frequency"]
+        keys.add(period_key(f))
+        for b in range(1, lookback + 1):
+            keys.add(_prev_period_key(f, b))
+    try:
+        done = db.get_done_periods(sorted(keys))
+    except Exception:
+        done = set()
+
+    pending, completed, missed = [], [], []
+    for t in tasks:
+        f = t["frequency"]
+        cur_key = period_key(f)
+        rec = {**t, "period_key": cur_key, "period_label": period_label(f)}
+        if (t["id"], cur_key) in done:
+            completed.append(rec)
+        else:
+            pending.append(rec)
+            # how many immediately-preceding periods were also skipped
+            miss = 0
+            for b in range(1, lookback + 1):
+                if (t["id"], _prev_period_key(f, b)) in done:
+                    break
+                miss += 1
+            if miss:
+                missed.append({**rec, "missed_periods": miss})
+
+    order = {"daily": 0, "weekly": 1, "monthly": 2}
+    pending.sort(key=lambda r: (order.get(r["frequency"], 9), r["title"].lower()))
+    return {"tasks": tasks, "pending": pending, "done": completed, "missed": missed}
+
+
+def work_pending_count() -> int:
+    """Pending-task count for the sidebar badge. Never raises."""
+    try:
+        if not _work_available():
+            return 0
+        tasks = db.get_work_tasks()
+        if not tasks:
+            return 0
+        keys = sorted({period_key(t["frequency"]) for t in tasks})
+        done = db.get_done_periods(keys)
+        return sum(1 for t in tasks
+                   if (t["id"], period_key(t["frequency"])) not in done)
+    except Exception:
+        return 0
+
+
+def render_work_banner():
+    """Prominent alert of outstanding work — shown at the top of the dashboard."""
+    if not _work_available():
+        return
+    status = get_work_status()
+    pending = status["pending"]
+    if not status["tasks"]:
+        return
+
+    if not pending:
+        st.markdown(
+            "<div style='background:rgba(0,230,118,.08);border:1px solid "
+            "rgba(0,230,118,.35);border-left:4px solid #00e676;border-radius:8px;"
+            "padding:10px 16px;margin-bottom:14px;'>"
+            "<span style='color:#00e676;font-weight:700;'>✅ All work up to date</span>"
+            "<span style='color:#8899a6;font-size:12.5px;margin-left:10px;'>"
+            f"{len(status['done'])} task(s) completed for the current period</span>"
+            "</div>", unsafe_allow_html=True)
+        return
+
+    missed_by_id = {m["id"]: m["missed_periods"] for m in status["missed"]}
+    items = []
+    for p in pending:
+        extra = ""
+        if missed_by_id.get(p["id"]):
+            n = missed_by_id[p["id"]]
+            unit = {"daily": "day", "weekly": "week", "monthly": "month"}[p["frequency"]]
+            extra = (f"<span style='color:#ff5252;font-weight:700;'> · "
+                     f"also missed {n} previous {unit}{'s' if n > 1 else ''}</span>")
+        items.append(
+            f"<li style='margin:3px 0;'>"
+            f"<b style='color:#ffd54f;'>{WORK_ICON[p['frequency']]} "
+            f"{WORK_LABEL[p['frequency']]}</b> — {p['title']} "
+            f"<span style='color:#8899a6;font-size:12px;'>({p['period_label']})</span>"
+            f"{extra}</li>")
+
+    st.markdown(
+        "<div style='background:rgba(255,202,40,.09);border:1px solid "
+        "rgba(255,202,40,.4);border-left:4px solid #ffca28;border-radius:8px;"
+        "padding:12px 18px;margin-bottom:14px;'>"
+        f"<div style='color:#ffca28;font-weight:700;font-size:15px;margin-bottom:4px;'>"
+        f"⚠️ {len(pending)} task(s) pending</div>"
+        f"<ul style='margin:4px 0 0 18px;padding:0;color:#dbe4ee;font-size:13.5px;'>"
+        + "".join(items) + "</ul></div>",
+        unsafe_allow_html=True)
+
+
+def render_work_tracker():
+    st.title("✅ Work Tracker")
+    st.caption("Recurring daily, weekly and monthly work. Completion is tracked "
+               "per period — a daily task ticked today is due again tomorrow.")
+
+    if not _work_available():
+        st.error("✅ Work Tracker not loaded yet.")
+        st.markdown(
+            "The app is running a cached copy of `database.py` from before the "
+            "work-tracker tables were added. It clears once Streamlit Cloud "
+            "finishes rebuilding.\n\nIf it persists, open "
+            "**Manage app → ⋮ → Reboot app**.")
+        return
+
+    with st.expander("➕ Add Task", expanded=not db.get_work_tasks()):
+        with st.form("add_work_task"):
+            w1, w2 = st.columns([3, 1])
+            with w1:
+                wtitle = st.text_input("Task *", placeholder="e.g. Update client holdings")
+            with w2:
+                wfreq = st.selectbox("Frequency", ["daily", "weekly", "monthly"],
+                                     format_func=lambda f: WORK_LABEL[f])
+            wnotes = st.text_input("Notes", placeholder="Optional detail")
+            if st.form_submit_button("Add Task", type="primary"):
+                if not wtitle.strip():
+                    st.error("Task description is required.")
+                else:
+                    db.add_work_task(wtitle.strip(), wfreq, wnotes.strip())
+                    st.success(f"Added: {wtitle.strip()}")
+                    st.rerun()
+
+    status = get_work_status()
+    if not status["tasks"]:
+        st.info("No tasks yet — add your first one above.")
+        return
+
+    p1, p2, p3 = st.columns(3)
+    with p1:
+        metric_card("Pending Now", str(len(status["pending"])),
+                    "loss" if status["pending"] else "profit")
+    with p2:
+        metric_card("Completed", str(len(status["done"])), "profit")
+    with p3:
+        metric_card("Total Tasks", str(len(status["tasks"])))
+
+    st.markdown("---")
+    render_work_banner()
+
+    done_ids = {t["id"] for t in status["done"]}
+    for freq in ("daily", "weekly", "monthly"):
+        rows = [t for t in status["tasks"] if t["frequency"] == freq]
+        if not rows:
+            continue
+        st.subheader(f"{WORK_ICON[freq]} {WORK_LABEL[freq]}")
+        st.caption(f"Current period: **{period_label(freq)}**")
+        pk = period_key(freq)
+
+        for t in rows:
+            is_done = t["id"] in done_ids
+            c1, c2, c3 = st.columns([6, 2, 1])
+            with c1:
+                mark = "✅" if is_done else "⬜"
+                colour = "#8899a6" if is_done else "#dbe4ee"
+                deco = "line-through" if is_done else "none"
+                note = (f"<div style='font-size:11.5px;color:#6b7785;margin-left:24px;'>"
+                        f"{t['notes']}</div>" if t.get("notes") else "")
+                st.markdown(
+                    f"<div style='padding:4px 0;'><span style='font-size:15px;'>{mark}</span> "
+                    f"<span style='color:{colour};text-decoration:{deco};"
+                    f"font-size:14px;'>{t['title']}</span>{note}</div>",
+                    unsafe_allow_html=True)
+            with c2:
+                last = db.get_last_done(t["id"])
+                st.markdown(
+                    f"<div style='font-size:11.5px;color:#6b7785;padding-top:8px;'>"
+                    f"{'Last: ' + last if last else 'Never completed'}</div>",
+                    unsafe_allow_html=True)
+            with c3:
+                if is_done:
+                    if st.button("Undo", key=f"wk_undo_{t['id']}", use_container_width=True):
+                        db.unmark_work_done(t["id"], pk)
+                        st.rerun()
+                else:
+                    if st.button("Done", key=f"wk_done_{t['id']}", type="primary",
+                                 use_container_width=True):
+                        db.mark_work_done(t["id"], pk)
+                        st.rerun()
+        st.markdown("")
+
+    with st.expander("⚙️ Manage Tasks"):
+        opts = {f"{WORK_LABEL[t['frequency']]} · {t['title']}": t["id"]
+                for t in status["tasks"]}
+        sel = st.selectbox("Task", list(opts.keys()), key="wk_manage_sel")
+        tid = opts[sel]
+        cur_t = next(t for t in status["tasks"] if t["id"] == tid)
+        e1, e2 = st.columns([3, 1])
+        with e1:
+            new_title = st.text_input("Title", value=cur_t["title"], key=f"wk_t_{tid}")
+        with e2:
+            new_freq = st.selectbox(
+                "Frequency", ["daily", "weekly", "monthly"],
+                index=["daily", "weekly", "monthly"].index(cur_t["frequency"]),
+                format_func=lambda f: WORK_LABEL[f], key=f"wk_f_{tid}")
+        new_notes = st.text_input("Notes", value=cur_t.get("notes") or "", key=f"wk_n_{tid}")
+        b1, b2 = st.columns(2)
+        if b1.button("💾 Save", key=f"wk_save_{tid}", use_container_width=True):
+            db.update_work_task(tid, title=new_title.strip(),
+                                frequency=new_freq, notes=new_notes.strip())
+            st.success("Saved.")
+            st.rerun()
+        if b2.button("🗑️ Delete task", key=f"wk_del_{tid}", use_container_width=True,
+                     help="Removes the task and its completion history"):
+            db.delete_work_task(tid)
+            st.success("Deleted.")
+            st.rerun()
+
+    with st.expander("🕘 Completion History"):
+        hist = db.get_work_history(200)
+        if not hist:
+            st.info("Nothing completed yet.")
+        else:
+            hdf = pd.DataFrame([{
+                "Task": h["title"],
+                "Frequency": WORK_LABEL.get(h["frequency"], h["frequency"]),
+                "Period": h["period_key"],
+                "Completed At": str(h["done_at"])[:19],
+                "Notes": h.get("notes") or "",
+            } for h in hist])
+            st.dataframe(hdf, width="stretch", hide_index=True,
+                         height=min(420, 50 + 35 * len(hdf)))
+            st.download_button("⬇️ Download History (CSV)",
+                               data=hdf.to_csv(index=False).encode("utf-8"),
+                               file_name=f"work_history_{datetime.now():%Y%m%d}.csv",
+                               mime="text/csv", key="wk_hist_dl")
+
+
+
 # ── Sidebar ─────────────────────────────────────────────────────────────────
 
 st.sidebar.markdown("""
@@ -721,17 +1012,24 @@ st.sidebar.markdown("---")
 if "nav" not in st.session_state:
     st.session_state["nav"] = "🏠 Master Dashboard"
 
-def _nav_btn(label: str, key: str, container=None, tooltip: str | None = None):
+def _nav_btn(label: str, key: str, container=None, tooltip: str | None = None,
+             nav_value: str | None = None):
     """Render a nav button. Active item uses type='primary' so the CSS above
-    can style it with a gold left rail."""
+    can style it with a gold left rail.
+
+    `nav_value` keeps the routing key stable when the label carries something
+    volatile (e.g. a pending-task count), which would otherwise break both the
+    active highlight and the router as the number changes.
+    """
     target = container if container is not None else st.sidebar
-    is_active = st.session_state["nav"] == label
+    value = nav_value or label
+    is_active = st.session_state["nav"] == value
     if target.button(
         label, key=key, use_container_width=True,
         type="primary" if is_active else "secondary",
         help=tooltip,
     ):
-        st.session_state["nav"] = label
+        st.session_state["nav"] = value
         st.rerun()
 
 
@@ -743,6 +1041,13 @@ _nav_btn("📊 Mutual Funds", "nav_mf")
 _nav_btn("📰 News", "nav_news")
 # Advisory clients — mandates, deployment and valuation
 _nav_btn("👥 Clients", "nav_clients")
+
+# Work tracker — label carries the pending count so it's visible on every page
+_work_pending = work_pending_count()
+_nav_btn(f"✅ Work Tracker{f'  ·  {_work_pending}' if _work_pending else ''}",
+         "nav_work", nav_value="✅ Work Tracker",
+         tooltip=(f"{_work_pending} task(s) pending" if _work_pending
+                  else "All work up to date"))
 
 # Group folios by group_name
 _groups: dict[str, list] = {}
@@ -783,6 +1088,9 @@ nav = st.session_state["nav"]
 def render_master_dashboard():
     st.title("Master Smallcase Dashboard")
     st.caption(f"Last refreshed: {datetime.now().strftime('%d %b %Y, %I:%M %p')}")
+
+    # Outstanding work first — this is the landing page, so it must be seen
+    render_work_banner()
 
     if not all_sc:
         st.info("Create your first smallcase from the sidebar to get started.")
@@ -4028,6 +4336,8 @@ elif nav == "📰 News":
     render_news_page()
 elif nav == "👥 Clients":
     render_clients()
+elif nav == "✅ Work Tracker":
+    render_work_tracker()
 else:
     # Find the matching smallcase
     for sc in all_sc:
