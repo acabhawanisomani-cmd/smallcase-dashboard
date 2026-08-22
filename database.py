@@ -291,6 +291,28 @@ def init_db():
             )
         """)
 
+    # ── Scrip → NSE ticker memory ───────────────────────────────────────────
+    # Broker statements carry scrip names but no tickers. Remember every
+    # mapping the user confirms so repeat uploads need no re-typing.
+    if _USE_PG:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS scrip_ticker_map (
+                scrip_key TEXT PRIMARY KEY,
+                scrip_name TEXT NOT NULL,
+                ticker TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+    else:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS scrip_ticker_map (
+                scrip_key TEXT PRIMARY KEY,
+                scrip_name TEXT NOT NULL,
+                ticker TEXT NOT NULL,
+                updated_at TEXT DEFAULT (datetime('now','localtime'))
+            )
+        """)
+
     # ── Migrations: add columns that didn't exist in older schema ──
     try:
         if _USE_PG:
@@ -919,6 +941,88 @@ def delete_client_holding(holding_id: int):
     conn = get_connection()
     conn.cursor().execute(f"DELETE FROM client_holdings WHERE id = {_ph()}", (holding_id,))
     conn.commit()
+    conn.close()
+
+
+def scrip_key(name: str) -> str:
+    """Normalise a scrip name so 'RAYMOND REALTY LTD.' and 'Raymond Realty'
+    resolve to the same key."""
+    import re as _re
+    n = _re.sub(r"[^A-Za-z0-9 ]", " ", str(name or "")).upper()
+    n = _re.sub(r"\b(LTD|LIMITED|LIMITE|THE|CO|COMPANY|PVT|PRIVATE|INDIA|"
+                r"CORP|CORPORATION|EN|NET)\b", " ", n)
+    return " ".join(n.split())
+
+
+def get_ticker_map() -> dict[str, str]:
+    """All remembered scrip_key -> ticker mappings."""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT scrip_key, ticker FROM scrip_ticker_map")
+        rows = cur.fetchall()
+    except Exception:
+        conn.close()
+        return {}
+    conn.close()
+    if _USE_PG:
+        return {r[0]: r[1] for r in rows}
+    return {r["scrip_key"] if not isinstance(r, tuple) else r[0]:
+            r["ticker"] if not isinstance(r, tuple) else r[1] for r in rows}
+
+
+def save_ticker_mappings(pairs: dict[str, str]):
+    """Upsert {scrip_name: ticker} pairs into the memory table."""
+    if not pairs:
+        return
+    conn = get_connection()
+    cur = conn.cursor()
+    ph = _ph()
+    for name, ticker in pairs.items():
+        if not str(ticker).strip():
+            continue
+        key = scrip_key(name)
+        if not key:
+            continue
+        tk = str(ticker).strip().upper()
+        if _USE_PG:
+            cur.execute(
+                "INSERT INTO scrip_ticker_map (scrip_key, scrip_name, ticker) "
+                "VALUES (%s, %s, %s) ON CONFLICT (scrip_key) DO UPDATE "
+                "SET ticker = EXCLUDED.ticker, scrip_name = EXCLUDED.scrip_name, "
+                "updated_at = NOW()",
+                (key, str(name).strip(), tk))
+        else:
+            cur.execute(
+                "INSERT INTO scrip_ticker_map (scrip_key, scrip_name, ticker) "
+                "VALUES (?, ?, ?) ON CONFLICT(scrip_key) DO UPDATE "
+                "SET ticker = excluded.ticker, scrip_name = excluded.scrip_name",
+                (key, str(name).strip(), tk))
+    conn.commit()
+    conn.close()
+
+
+def replace_client_holdings(client_id: int, rows: list[dict]):
+    """Swap a client's holdings for `rows` in one transaction, so a failure
+    can't leave the client with no positions.
+    rows: [{ticker, scrip_name, units, buy_price, buy_date}]"""
+    conn = get_connection()
+    cur = conn.cursor()
+    ph = _ph()
+    try:
+        cur.execute(f"DELETE FROM client_holdings WHERE client_id = {ph}", (client_id,))
+        for r in rows:
+            cur.execute(
+                f"INSERT INTO client_holdings "
+                f"(client_id, ticker, scrip_name, units, buy_price, buy_date) "
+                f"VALUES ({_ph(6)})",
+                (client_id, str(r["ticker"]).upper(), r["scrip_name"],
+                 float(r["units"]), float(r["buy_price"]), r.get("buy_date", "")))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        conn.close()
+        raise
     conn.close()
 
 

@@ -10,6 +10,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, date
 import io
+import re
 import database as db
 import finance as fin
 
@@ -2937,14 +2938,18 @@ def _render_client_detail(client: dict, cid: int, t: dict, table: pd.DataFrame):
                 st.session_state[pkey] = None if active == name else name
                 st.rerun()
 
-    b = st.columns(4)
-    _cbtn("➕ Add Stock", "add", b[0], "Add a holding for this client")
-    _cbtn("📥 Copy from Folio", "copy", b[1],
+    b = st.columns(5)
+    _cbtn("📤 Upload Holdings", "upload", b[0],
+          "Upload the broker's Consolidated Holding sheet to refresh this client's book")
+    _cbtn("➕ Add Stock", "add", b[1], "Add a holding for this client")
+    _cbtn("📥 Copy from Folio", "copy", b[2],
           "Replicate an existing folio's stocks for this client, scaled to the mandate")
-    _cbtn("⚙️ Client Settings", "settings", b[2], "Edit mandate, code, notes — or remove the client")
-    _cbtn("📄 Statement", "stmt", b[3], "Download a formatted statement")
+    _cbtn("⚙️ Client Settings", "settings", b[3], "Edit mandate, code, notes — or remove the client")
+    _cbtn("📄 Statement", "stmt", b[4], "Download a formatted statement")
 
-    if active == "add":
+    if active == "upload":
+        _client_upload_holdings(cid, client)
+    elif active == "add":
         _client_add_stock(cid)
     elif active == "copy":
         _client_copy_folio(cid, t)
@@ -3055,6 +3060,209 @@ def _client_add_stock(cid: int):
                     st.session_state.pop(lk, None)
                     st.success(f"Added {tk} — {qty:,.2f} units @ ₹{bp:,.2f}")
                     st.rerun()
+
+
+def parse_consolidated_holding(file_bytes: bytes) -> pd.DataFrame:
+    """Parse a broker 'Consolidated Holding' sheet.
+
+    Expects a header row containing SCRIP and QUANTITY; tolerates the header
+    not being on row 1, extra columns, and a trailing GRAND TOTAL row.
+    Returns columns: Scrip Name, Quantity, Buy Price, Market Price.
+    """
+    raw = pd.read_excel(io.BytesIO(file_bytes), header=None, engine="openpyxl")
+    if raw.empty:
+        raise ValueError("The sheet is empty.")
+
+    def norm(v):
+        return re.sub(r"[^a-z%]", "", str(v).lower()) if v is not None else ""
+
+    # Locate the header row
+    hdr_idx, cmap = None, {}
+    for i in range(min(25, len(raw))):
+        cells = {norm(v): j for j, v in enumerate(raw.iloc[i].tolist())}
+        if any("scrip" in k or k in ("stock", "security", "name") for k in cells) \
+                and any("quantity" in k or k == "qty" for k in cells):
+            hdr_idx, cmap = i, cells
+            break
+    if hdr_idx is None:
+        raise ValueError(
+            "Could not find a header row with SCRIP and QUANTITY columns. "
+            "Is this the Consolidated Holding export?")
+
+    def col(*names):
+        for want in names:
+            for k, j in cmap.items():
+                if k == want:
+                    return j
+        for want in names:                       # fall back to substring
+            for k, j in cmap.items():
+                if want in k:
+                    return j
+        return None
+
+    c_scrip = col("scrip", "stock", "security", "name")
+    c_qty = col("quantity", "qty")
+    c_buy = col("buyprice", "avgprice", "averageprice", "rate", "cost")
+    c_mkt = col("marketprice", "ltp", "closingprice", "currentprice")
+    c_bval = col("buyvalue", "investedvalue", "costvalue")
+
+    rows = []
+    for _, r in raw.iloc[hdr_idx + 1:].iterrows():
+        name = r.iloc[c_scrip] if c_scrip is not None else None
+        if name is None or (isinstance(name, float) and pd.isna(name)):
+            continue
+        name = str(name).strip()
+        if not name or re.search(r"grand\s*total|^total\b", name, re.I):
+            continue
+
+        def num(idx):
+            if idx is None:
+                return 0.0
+            v = r.iloc[idx]
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                return 0.0
+            try:
+                return float(str(v).replace(",", "").strip())
+            except (TypeError, ValueError):
+                return 0.0
+
+        qty, buy, mkt = num(c_qty), num(c_buy), num(c_mkt)
+        if buy <= 0:                       # derive from buy value when needed
+            bval = num(c_bval)
+            if bval > 0 and qty > 0:
+                buy = round(bval / qty, 4)
+        if qty <= 0:
+            continue
+        rows.append({"Scrip Name": name, "Quantity": qty,
+                     "Buy Price": buy, "Market Price": mkt})
+
+    if not rows:
+        raise ValueError("No holding rows found below the header.")
+    return pd.DataFrame(rows)
+
+
+def _suggest_tickers(scrips: list[str]) -> dict[str, str]:
+    """Best-effort ticker for each scrip: remembered mappings first, then a
+    normalised match against tickers already used in folios/clients."""
+    out: dict[str, str] = {}
+    try:
+        remembered = db.get_ticker_map()
+    except Exception:
+        remembered = {}
+
+    known: dict[str, str] = {}
+    try:
+        for s in db.get_all_smallcases():
+            h = db.get_holdings(s["id"], active_only=False)
+            for _, r in h.iterrows():
+                k = db.scrip_key(r["scrip_name"])
+                if k:
+                    known.setdefault(k, str(r["ticker"]).upper())
+    except Exception:
+        pass
+
+    for name in scrips:
+        k = db.scrip_key(name)
+        tk = remembered.get(k) or known.get(k, "")
+        # Prefix match rescues truncated names ("SATIN CREDITCARE NET." vs
+        # "SATIN CREDITCARE NETWORK LIMIT"), but only when the shorter key is
+        # long enough to be distinctive — otherwise "GEE" would match anything.
+        if not tk and len(k) >= 8:
+            for kk, vv in list(remembered.items()) + list(known.items()):
+                if len(kk) >= 8 and (kk.startswith(k) or k.startswith(kk)):
+                    tk = vv
+                    break
+        out[name] = tk or ""
+    return out
+
+
+def _client_upload_holdings(cid: int, client: dict):
+    """Upload a broker Consolidated Holding sheet and replace this client's book."""
+    with st.container(border=True):
+        st.markdown(
+            f"Upload the **Consolidated Holding** export for **{client['name']}**. "
+            "Quantities and buy prices are read from the sheet; current prices "
+            "are fetched live, so the Market Price column is ignored."
+        )
+        st.warning("⚠️ Importing **replaces every holding** currently recorded "
+                   "for this client.")
+
+        up = st.file_uploader("Consolidated Holding (.xlsx / .xls)",
+                              type=["xlsx", "xls"], key=f"cl_up_{cid}")
+        if not up:
+            return
+
+        try:
+            parsed = parse_consolidated_holding(up.read())
+        except Exception as e:
+            st.error(f"Could not read the file: {e}")
+            return
+
+        sugg = _suggest_tickers(parsed["Scrip Name"].tolist())
+        parsed = parsed.copy()
+        parsed.insert(0, "Include", True)
+        parsed.insert(2, "NSE Ticker", [sugg.get(n, "") for n in parsed["Scrip Name"]])
+        parsed["Buy Value"] = (parsed["Quantity"] * parsed["Buy Price"]).round(2)
+
+        auto = sum(1 for v in parsed["NSE Ticker"] if v)
+        st.success(f"Read **{len(parsed)}** holdings · "
+                   f"**{auto}** ticker(s) filled in automatically.")
+        if auto < len(parsed):
+            st.caption("Fill the blank **NSE Ticker** cells below — they're "
+                       "remembered for every future upload.")
+
+        edited = st.data_editor(
+            parsed, hide_index=True, width="stretch", num_rows="fixed",
+            key=f"cl_upedit_{cid}",
+            column_config={
+                "Include": st.column_config.CheckboxColumn("Include", width="small"),
+                "Scrip Name": st.column_config.TextColumn(disabled=True, width="large"),
+                "NSE Ticker": st.column_config.TextColumn(
+                    "NSE Ticker", width="small",
+                    help="Symbol without .NS — e.g. SHILPAMED, UNIVCABLES"),
+                "Quantity": st.column_config.NumberColumn(format="%.0f", width="small"),
+                "Buy Price": st.column_config.NumberColumn(format="₹%.2f"),
+                "Market Price": st.column_config.NumberColumn(
+                    disabled=True, format="₹%.2f",
+                    help="From the sheet — informational only; live prices are used"),
+                "Buy Value": st.column_config.NumberColumn(disabled=True, format="₹%.2f"),
+            },
+        )
+
+        take = edited[edited["Include"] & (edited["Quantity"] > 0)].copy()
+        take["NSE Ticker"] = take["NSE Ticker"].astype(str).str.strip().str.upper()
+        missing = take[take["NSE Ticker"] == ""]
+        invested = float((take["Quantity"] * take["Buy Price"]).sum()) if not take.empty else 0.0
+
+        if not missing.empty:
+            st.warning(f"⚠️ {len(missing)} stock(s) still need a ticker: "
+                       + ", ".join(missing["Scrip Name"].head(6).tolist()))
+
+        mandate = float(client.get("mandate_amount") or 0)
+        i1, i2 = st.columns([3, 1])
+        with i1:
+            msg = f"**{len(take)}** holdings · invested **₹{invested:,.2f}**"
+            if mandate > 0:
+                msg += f" · {invested / mandate * 100:.1f}% of mandate"
+            st.markdown(msg)
+        with i2:
+            ok = missing.empty and not take.empty
+            if st.button("✅ Import & Replace", key=f"cl_doup_{cid}",
+                         type="primary", disabled=not ok, use_container_width=True):
+                rows = [{"ticker": r["NSE Ticker"], "scrip_name": r["Scrip Name"],
+                         "units": float(r["Quantity"]), "buy_price": float(r["Buy Price"]),
+                         "buy_date": date.today().strftime("%Y-%m-%d")}
+                        for _, r in take.iterrows()]
+                try:
+                    db.replace_client_holdings(cid, rows)
+                    db.save_ticker_mappings(
+                        {r["Scrip Name"]: r["NSE Ticker"] for _, r in take.iterrows()})
+                except Exception as e:
+                    st.error(f"Import failed — nothing was changed: {e}")
+                    return
+                st.cache_data.clear()
+                st.success(f"Imported {len(rows)} holdings for {client['name']}.")
+                st.rerun()
 
 
 def _client_copy_folio(cid: int, t: dict):
