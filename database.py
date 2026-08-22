@@ -291,6 +291,42 @@ def init_db():
             )
         """)
 
+    # ── Realized gains ledger (per client) ──────────────────────────────────
+    if _USE_PG:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS client_realized (
+                id SERIAL PRIMARY KEY,
+                client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+                ticker TEXT DEFAULT '',
+                scrip_name TEXT NOT NULL,
+                units DOUBLE PRECISION DEFAULT 0,
+                buy_price DOUBLE PRECISION DEFAULT 0,
+                sell_price DOUBLE PRECISION DEFAULT 0,
+                buy_date TEXT,
+                sell_date TEXT,
+                charges DOUBLE PRECISION DEFAULT 0,
+                notes TEXT DEFAULT '',
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+    else:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS client_realized (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+                ticker TEXT DEFAULT '',
+                scrip_name TEXT NOT NULL,
+                units REAL DEFAULT 0,
+                buy_price REAL DEFAULT 0,
+                sell_price REAL DEFAULT 0,
+                buy_date TEXT,
+                sell_date TEXT,
+                charges REAL DEFAULT 0,
+                notes TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now','localtime'))
+            )
+        """)
+
     # ── Scrip → NSE ticker memory ───────────────────────────────────────────
     # Broker statements carry scrip names but no tickers. Remember every
     # mapping the user confirms so repeat uploads need no re-typing.
@@ -942,6 +978,93 @@ def delete_client_holding(holding_id: int):
     conn.cursor().execute(f"DELETE FROM client_holdings WHERE id = {_ph()}", (holding_id,))
     conn.commit()
     conn.close()
+
+
+def get_client_realized(client_id: int) -> pd.DataFrame:
+    conn = get_connection()
+    df = pd.read_sql_query(
+        f"SELECT * FROM client_realized WHERE client_id = {_ph()} "
+        f"ORDER BY sell_date DESC, id DESC",
+        conn, params=(client_id,),
+    )
+    conn.close()
+    return df
+
+
+def add_client_realized(client_id: int, scrip_name: str, units: float,
+                        buy_price: float, sell_price: float,
+                        buy_date: str = "", sell_date: str = "",
+                        ticker: str = "", charges: float = 0.0,
+                        notes: str = "") -> int:
+    conn = get_connection()
+    cur = conn.cursor()
+    cols = ("(client_id, ticker, scrip_name, units, buy_price, sell_price, "
+            "buy_date, sell_date, charges, notes)")
+    args = (client_id, ticker, scrip_name, units, buy_price, sell_price,
+            buy_date, sell_date, charges, notes)
+    if _USE_PG:
+        cur.execute(f"INSERT INTO client_realized {cols} VALUES ({_ph(10)}) RETURNING id", args)
+    else:
+        cur.execute(f"INSERT INTO client_realized {cols} VALUES ({_ph(10)})", args)
+    rid = _last_id(cur, "client_realized")
+    conn.commit()
+    conn.close()
+    return rid
+
+
+def delete_client_realized(realized_id: int):
+    conn = get_connection()
+    conn.cursor().execute(
+        f"DELETE FROM client_realized WHERE id = {_ph()}", (realized_id,))
+    conn.commit()
+    conn.close()
+
+
+def book_client_sale(client_id: int, holding_id: int, units_sold: float,
+                     sell_price: float, sell_date: str, charges: float = 0.0,
+                     notes: str = "") -> int:
+    """Record a sale against an existing holding and reduce (or remove) it.
+
+    Done in one transaction so the ledger entry and the position change can
+    never diverge.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    ph = _ph()
+    try:
+        cur.execute(f"SELECT * FROM client_holdings WHERE id = {ph}", (holding_id,))
+        row = _fetch_dict(cur)
+        if not row:
+            raise ValueError("Holding not found.")
+        held = float(row["units"] or 0)
+        if units_sold <= 0:
+            raise ValueError("Units sold must be greater than zero.")
+        if units_sold > held + 1e-9:
+            raise ValueError(f"Cannot sell {units_sold:g} — only {held:g} held.")
+
+        cur.execute(
+            f"INSERT INTO client_realized (client_id, ticker, scrip_name, units, "
+            f"buy_price, sell_price, buy_date, sell_date, charges, notes) "
+            f"VALUES ({_ph(10)})",
+            (client_id, row["ticker"], row["scrip_name"], units_sold,
+             float(row["buy_price"] or 0), sell_price, row["buy_date"] or "",
+             sell_date, charges, notes))
+        rid = _last_id(cur, "client_realized")
+
+        remaining = round(held - units_sold, 6)
+        if remaining <= 1e-9:
+            cur.execute(f"DELETE FROM client_holdings WHERE id = {ph}", (holding_id,))
+        else:
+            cur.execute(
+                f"UPDATE client_holdings SET units = {ph}, updated_at = {_now_expr()} "
+                f"WHERE id = {ph}", (remaining, holding_id))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        conn.close()
+        raise
+    conn.close()
+    return rid
 
 
 def scrip_key(name: str) -> str:

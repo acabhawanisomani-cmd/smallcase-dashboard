@@ -8,7 +8,7 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import io
 import re
 import database as db
@@ -2641,6 +2641,77 @@ def build_client_table(holdings: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+LTCG_DAYS = 365   # listed equity held beyond 12 months is long-term
+
+
+def _fin_year(date_str: str) -> str:
+    """Indian financial year label (Apr–Mar) for a date string."""
+    try:
+        d = datetime.strptime(str(date_str)[:10], "%Y-%m-%d").date()
+    except Exception:
+        return "—"
+    y = d.year if d.month >= 4 else d.year - 1
+    return f"FY {y}-{str(y + 1)[-2:]}"
+
+
+def build_realized_table(realized: pd.DataFrame) -> pd.DataFrame:
+    """Realized ledger with P/L, holding period and STCG/LTCG classification."""
+    if realized.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for _, r in realized.iterrows():
+        units = float(r["units"] or 0)
+        bp, sp = float(r["buy_price"] or 0), float(r["sell_price"] or 0)
+        charges = float(r.get("charges") or 0)
+        buy_val = round(units * bp, 2)
+        sell_val = round(units * sp, 2)
+        pnl = round(sell_val - buy_val - charges, 2)
+
+        days = None
+        try:
+            bd = datetime.strptime(str(r["buy_date"])[:10], "%Y-%m-%d").date()
+            sd = datetime.strptime(str(r["sell_date"])[:10], "%Y-%m-%d").date()
+            days = (sd - bd).days
+        except Exception:
+            pass
+
+        rows.append({
+            "ID": r["id"],
+            "Scrip Name": r["scrip_name"],
+            "Ticker": r.get("ticker") or "",
+            "Units": units,
+            "Buy Price": bp,
+            "Sell Price": sp,
+            "Buy Value": buy_val,
+            "Sell Value": sell_val,
+            "Charges": charges,
+            "Realized P/L": pnl,
+            "Return %": round(pnl / buy_val * 100, 2) if buy_val > 0 else 0.0,
+            "Buy Date": str(r["buy_date"] or "")[:10],
+            "Sell Date": str(r["sell_date"] or "")[:10],
+            "Days Held": days if days is not None else "",
+            "Type": ("LTCG" if days is not None and days > LTCG_DAYS
+                     else "STCG" if days is not None else "—"),
+            "FY": _fin_year(r["sell_date"]),
+        })
+    return pd.DataFrame(rows)
+
+
+def _realized_summary(rt: pd.DataFrame) -> dict:
+    if rt.empty:
+        return {"total": 0.0, "stcg": 0.0, "ltcg": 0.0, "count": 0,
+                "charges": 0.0, "sell_value": 0.0}
+    return {
+        "total": float(rt["Realized P/L"].sum()),
+        "stcg": float(rt[rt["Type"] == "STCG"]["Realized P/L"].sum()),
+        "ltcg": float(rt[rt["Type"] == "LTCG"]["Realized P/L"].sum()),
+        "count": len(rt),
+        "charges": float(rt["Charges"].sum()),
+        "sell_value": float(rt["Sell Value"].sum()),
+    }
+
+
 def _client_totals(client: dict) -> dict:
     """Mandate / invested / market value / P-L / idle cash for one client."""
     h = db.get_client_holdings(client["id"])
@@ -2649,13 +2720,25 @@ def _client_totals(client: dict) -> dict:
     mkt = float(t["Market Value"].sum()) if not t.empty else 0.0
     mandate = float(client.get("mandate_amount") or 0)
     pnl = mkt - invested
+
+    try:
+        rt = build_realized_table(db.get_client_realized(client["id"]))
+    except Exception:
+        rt = pd.DataFrame()
+    rs = _realized_summary(rt)
+
+    total_pnl = pnl + rs["total"]
     return {
         "table": t,
+        "realized_table": rt,
+        "realized": rs,
         "mandate": mandate,
         "invested": invested,
         "market_value": mkt,
         "pnl": pnl,
         "pnl_pct": round(pnl / invested * 100, 2) if invested > 0 else 0.0,
+        "realized_pl": rs["total"],
+        "total_pnl": total_pnl,
         "idle_cash": mandate - invested,
         "deployed_pct": round(invested / mandate * 100, 2) if mandate > 0 else 0.0,
         "stocks": 0 if t.empty else len(t),
@@ -2675,6 +2758,7 @@ def build_client_excel(client: dict, table: pd.DataFrame, totals: dict) -> bytes
     cols = [c for c in cols if c in table.columns]
     df = table[cols].copy() if not table.empty else pd.DataFrame(columns=cols)
 
+    rs = totals.get("realized") or {"total": 0.0, "stcg": 0.0, "ltcg": 0.0}
     summary = {
         "Mandated Amount": round(totals["mandate"], 2),
         "Amount Invested": round(totals["invested"], 2),
@@ -2683,6 +2767,10 @@ def build_client_excel(client: dict, table: pd.DataFrame, totals: dict) -> bytes
         "Current Market Value": round(totals["market_value"], 2),
         "Unrealised P/L": round(totals["pnl"], 2),
         "Return %": round(totals["pnl_pct"], 2),
+        "Realized P/L": round(rs["total"], 2),
+        "  of which STCG": round(rs["stcg"], 2),
+        "  of which LTCG": round(rs["ltcg"], 2),
+        "Total P/L": round(totals.get("total_pnl", totals["pnl"]), 2),
         "No. of Stocks": totals["stocks"],
     }
 
@@ -2742,6 +2830,52 @@ def build_client_excel(client: dict, table: pd.DataFrame, totals: dict) -> bytes
         ws.column_dimensions["A"].width = max(ws.column_dimensions["A"].width or 12, 22)
         ws.freeze_panes = ws.cell(row=hdr + 1, column=1)
 
+        # ── Realized gains sheet ────────────────────────────────────────────
+        rt = totals.get("realized_table")
+        if rt is not None and not rt.empty:
+            rcols = ["Scrip Name", "Ticker", "Units", "Buy Price", "Sell Price",
+                     "Buy Value", "Sell Value", "Charges", "Realized P/L",
+                     "Return %", "Buy Date", "Sell Date", "Days Held", "Type", "FY"]
+            rcols = [c for c in rcols if c in rt.columns]
+            rdf = rt[rcols].copy()
+            rdf.to_excel(writer, index=False, sheet_name="Realized Gains", startrow=2)
+            ws2 = writer.sheets["Realized Gains"]
+            ws2.cell(row=1, column=1,
+                     value=f"{client['name']} — Realized Gains").font = \
+                Font(bold=True, size=13, color="B8860B")
+
+            for ci in range(1, len(rcols) + 1):
+                cell = ws2.cell(row=3, column=ci)
+                cell.font = Font(bold=True, color="FFFFFF")
+                cell.fill = fill
+                cell.alignment = Alignment(horizontal="center", wrap_text=True)
+
+            rfmt = {"Units": '#,##0.00', "Buy Price": money, "Sell Price": money,
+                    "Buy Value": money, "Sell Value": money, "Charges": money,
+                    "Realized P/L": money, "Return %": pct}
+            for ci, name in enumerate(rcols, start=1):
+                for r in range(4, 4 + len(rdf)):
+                    cell = ws2.cell(row=r, column=ci)
+                    if name in rfmt:
+                        cell.number_format = rfmt[name]
+                    if name in ("Realized P/L", "Return %") and isinstance(cell.value, (int, float)):
+                        cell.font = Font(color="008000" if cell.value >= 0 else "CC0000")
+
+            trow = 4 + len(rdf)
+            ws2.cell(row=trow, column=1, value="TOTAL").font = Font(bold=True)
+            for ci, name in enumerate(rcols, start=1):
+                if name in ("Buy Value", "Sell Value", "Charges", "Realized P/L"):
+                    L = get_column_letter(ci)
+                    c = ws2.cell(row=trow, column=ci,
+                                 value=f"=SUM({L}4:{L}{3+len(rdf)})")
+                    c.font = Font(bold=True)
+                    c.number_format = money
+
+            for ci, name in enumerate(rcols, start=1):
+                longest = max([len(str(name))] + [len(str(v)) for v in rdf[name].tolist()])
+                ws2.column_dimensions[get_column_letter(ci)].width = min(max(longest + 2, 11), 30)
+            ws2.freeze_panes = ws2.cell(row=4, column=1)
+
     buf.seek(0)
     return buf.getvalue()
 
@@ -2798,8 +2932,9 @@ def render_clients():
     g_mkt = sum(t["market_value"] for t in all_tot.values())
     g_pnl = g_mkt - g_invested
     g_pct = round(g_pnl / g_invested * 100, 2) if g_invested > 0 else 0.0
+    g_real = sum(t["realized_pl"] for t in all_tot.values())
 
-    m1, m2, m3, m4, m5 = st.columns(5)
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
     with m1:
         metric_card("Total Mandate", format_inr(g_mandate))
     with m2:
@@ -2811,6 +2946,9 @@ def render_clients():
         metric_card("Unrealised P/L", f"{format_inr(g_pnl)} ({g_pct:+.2f}%)",
                     "profit" if g_pnl >= 0 else "loss")
     with m5:
+        metric_card("Realized P/L", format_inr(g_real),
+                    "profit" if g_real >= 0 else "loss")
+    with m6:
         metric_card("Un-deployed Cash", format_inr(g_mandate - g_invested),
                     "neutral" if g_mandate >= g_invested else "loss")
 
@@ -2833,17 +2971,21 @@ def render_clients():
                 "Deployed %": t["deployed_pct"],
                 "Idle Cash": t["idle_cash"],
                 "Market Value": t["market_value"],
-                "P/L": t["pnl"],
+                "Unrealised P/L": t["pnl"],
                 "P/L %": t["pnl_pct"],
+                "Realized P/L": t["realized_pl"],
+                "Total P/L": t["total_pnl"],
                 "Stocks": t["stocks"],
             })
         rdf = pd.DataFrame(rows)
         st.dataframe(
             rdf.style
-               .map(color_pnl, subset=["P/L", "P/L %"])
+               .map(color_pnl, subset=["Unrealised P/L", "P/L %",
+                                       "Realized P/L", "Total P/L"])
                .format({"Mandate": "₹{:,.0f}", "Invested": "₹{:,.0f}",
                         "Idle Cash": "₹{:,.0f}", "Market Value": "₹{:,.0f}",
-                        "P/L": "₹{:,.0f}", "P/L %": "{:+.2f}%",
+                        "Unrealised P/L": "₹{:,.0f}", "P/L %": "{:+.2f}%",
+                        "Realized P/L": "₹{:,.0f}", "Total P/L": "₹{:,.0f}",
                         "Deployed %": "{:.1f}%"}),
             width="stretch", hide_index=True,
             column_config={
@@ -2868,11 +3010,11 @@ def render_clients():
                               yaxis=dict(gridcolor="#2d2d44"))
             st.plotly_chart(fig, use_container_width=True)
         with cc2:
-            st.markdown("**P/L by Client**")
-            d = rdf.sort_values("P/L")
+            st.markdown("**Total P/L by Client** (realized + unrealised)")
+            d = rdf.sort_values("Total P/L")
             fig = go.Figure(go.Bar(
-                x=d["P/L"], y=d["Client"], orientation="h",
-                marker_color=["#ff5252" if v < 0 else "#00e676" for v in d["P/L"]],
+                x=d["Total P/L"], y=d["Client"], orientation="h",
+                marker_color=["#ff5252" if v < 0 else "#00e676" for v in d["Total P/L"]],
                 hovertemplate="%{y}<br>₹%{x:,.0f}<extra></extra>"))
             fig.update_layout(**_CHART_LAYOUT, height=330,
                               xaxis=dict(title="P/L (₹)", gridcolor="#2d2d44",
@@ -2907,7 +3049,7 @@ def _render_client_detail(client: dict, cid: int, t: dict, table: pd.DataFrame):
             pct = min(t["deployed_pct"] / 100, 1.0)
             st.progress(pct, text=f"Deployed {t['deployed_pct']:.1f}% of mandate")
 
-    d1, d2, d3, d4, d5 = st.columns(5)
+    d1, d2, d3, d4, d5, d6 = st.columns(6)
     with d1:
         metric_card("Mandate", format_inr(t["mandate"]))
     with d2:
@@ -2919,8 +3061,18 @@ def _render_client_detail(client: dict, cid: int, t: dict, table: pd.DataFrame):
         metric_card("Unrealised P/L", f"{format_inr(t['pnl'])} ({t['pnl_pct']:+.2f}%)",
                     "profit" if t["pnl"] >= 0 else "loss")
     with d5:
+        metric_card("Realized P/L", format_inr(t["realized_pl"]),
+                    "profit" if t["realized_pl"] >= 0 else "loss")
+    with d6:
         metric_card("Idle Cash", format_inr(t["idle_cash"]),
                     "loss" if t["idle_cash"] < 0 else "neutral")
+
+    st.markdown(
+        f"<div style='text-align:right;font-size:12.5px;color:#8899a6;"
+        f"margin:-4px 0 6px;'>Total P/L (realized + unrealised): "
+        f"<b style='color:{'#00e676' if t['total_pnl'] >= 0 else '#ff5252'};'>"
+        f"{format_inr(t['total_pnl'])}</b></div>",
+        unsafe_allow_html=True)
 
     if t["idle_cash"] < 0:
         st.warning(f"⚠️ Invested amount exceeds the mandate by "
@@ -2938,19 +3090,23 @@ def _render_client_detail(client: dict, cid: int, t: dict, table: pd.DataFrame):
                 st.session_state[pkey] = None if active == name else name
                 st.rerun()
 
-    b = st.columns(5)
+    b = st.columns(6)
     _cbtn("📤 Upload Holdings", "upload", b[0],
           "Upload the broker's Consolidated Holding sheet to refresh this client's book")
     _cbtn("➕ Add Stock", "add", b[1], "Add a holding for this client")
-    _cbtn("📥 Copy from Folio", "copy", b[2],
+    _cbtn("💰 Realized Gains", "realized", b[2],
+          "Book sales and review realized profit, split STCG / LTCG")
+    _cbtn("📥 Copy from Folio", "copy", b[3],
           "Replicate an existing folio's stocks for this client, scaled to the mandate")
-    _cbtn("⚙️ Client Settings", "settings", b[3], "Edit mandate, code, notes — or remove the client")
-    _cbtn("📄 Statement", "stmt", b[4], "Download a formatted statement")
+    _cbtn("⚙️ Client Settings", "settings", b[4], "Edit mandate, code, notes — or remove the client")
+    _cbtn("📄 Statement", "stmt", b[5], "Download a formatted statement")
 
     if active == "upload":
         _client_upload_holdings(cid, client)
     elif active == "add":
         _client_add_stock(cid)
+    elif active == "realized":
+        _client_realized_panel(client, cid, t)
     elif active == "copy":
         _client_copy_folio(cid, t)
     elif active == "settings":
@@ -3399,6 +3555,166 @@ def _client_copy_folio(cid: int, t: dict):
             st.rerun()
 
 
+def _client_realized_panel(client: dict, cid: int, t: dict):
+    """Realized-gains ledger: book sales, record past exits, review by FY."""
+    with st.container(border=True):
+        rt = t.get("realized_table", pd.DataFrame())
+        rs = t.get("realized", _realized_summary(rt))
+
+        r1, r2, r3, r4 = st.columns(4)
+        with r1:
+            metric_card("Total Realized", format_inr(rs["total"]),
+                        "profit" if rs["total"] >= 0 else "loss")
+        with r2:
+            metric_card("Short Term (STCG)", format_inr(rs["stcg"]),
+                        "profit" if rs["stcg"] >= 0 else "loss")
+        with r3:
+            metric_card("Long Term (LTCG)", format_inr(rs["ltcg"]),
+                        "profit" if rs["ltcg"] >= 0 else "loss")
+        with r4:
+            metric_card("Transactions", str(rs["count"]))
+
+        tab_book, tab_manual = st.tabs(["📕 Book a Sale", "✍️ Record Past Exit"])
+
+        # ── Book a sale against a live holding ──────────────────────────────
+        with tab_book:
+            holdings = t["table"]
+            if holdings.empty:
+                st.info("No holdings to sell. Use **Record Past Exit** for "
+                        "trades already closed.")
+            else:
+                st.caption("Sells from an existing holding — the position is "
+                           "reduced (or removed) and the gain booked, in one step.")
+                opts = {f"{r['Scrip Name']} ({r['Ticker']}) · {r['Units']:,.0f} units":
+                        int(r["ID"]) for _, r in holdings.iterrows()}
+                pick = st.selectbox("Holding", list(opts.keys()), key=f"rz_h_{cid}")
+                hid = opts[pick]
+                hrow = holdings[holdings["ID"] == hid].iloc[0]
+
+                s1, s2, s3 = st.columns(3)
+                with s1:
+                    qty = st.number_input("Units to sell", min_value=0.0,
+                                          max_value=float(hrow["Units"]),
+                                          value=float(hrow["Units"]), step=1.0,
+                                          key=f"rz_q_{cid}")
+                with s2:
+                    sp = st.number_input("Sell Price (₹)", min_value=0.0, step=0.5,
+                                         value=float(hrow["Current Price"]),
+                                         key=f"rz_sp_{cid}")
+                with s3:
+                    sd = st.date_input("Sell Date", value=date.today(), key=f"rz_sd_{cid}")
+
+                chg = st.number_input("Charges / brokerage (₹) — optional",
+                                      min_value=0.0, step=10.0, value=0.0,
+                                      key=f"rz_ch_{cid}")
+
+                gross = qty * sp
+                cost = qty * float(hrow["Buy Price"])
+                net = gross - cost - chg
+                st.markdown(
+                    f"Sell value **₹{gross:,.2f}** − cost **₹{cost:,.2f}**"
+                    + (f" − charges ₹{chg:,.2f}" if chg else "")
+                    + f" = **{format_inr(net)}**"
+                )
+
+                if st.button("📕 Book Sale", key=f"rz_book_{cid}", type="primary",
+                             disabled=qty <= 0 or sp <= 0):
+                    try:
+                        db.book_client_sale(cid, hid, qty, sp,
+                                            sd.strftime("%Y-%m-%d"), chg)
+                    except Exception as e:
+                        st.error(f"Could not book the sale: {e}")
+                    else:
+                        st.cache_data.clear()
+                        st.success(f"Booked — realized {format_inr(net)}.")
+                        st.rerun()
+
+        # ── Manually record an already-closed trade ─────────────────────────
+        with tab_manual:
+            st.caption("For exits made before this client was set up here.")
+            with st.form(f"rz_form_{cid}"):
+                m1, m2, m3 = st.columns(3)
+                with m1:
+                    nm = st.text_input("Scrip Name *")
+                    tkr = st.text_input("Ticker")
+                with m2:
+                    munits = st.number_input("Units", min_value=0.0, step=1.0)
+                    mbp = st.number_input("Buy Price (₹)", min_value=0.0, step=0.5)
+                with m3:
+                    msp = st.number_input("Sell Price (₹)", min_value=0.0, step=0.5)
+                    mchg = st.number_input("Charges (₹)", min_value=0.0, step=10.0)
+                d1, d2 = st.columns(2)
+                with d1:
+                    mbd = st.date_input("Buy Date", value=date.today() - timedelta(days=365))
+                with d2:
+                    msd = st.date_input("Sell Date", value=date.today())
+                mnote = st.text_input("Notes")
+
+                if st.form_submit_button("➕ Add to Ledger", type="primary"):
+                    if not nm.strip() or munits <= 0 or msp <= 0:
+                        st.error("Scrip name, units and sell price are required.")
+                    else:
+                        db.add_client_realized(
+                            cid, nm.strip(), munits, mbp, msp,
+                            mbd.strftime("%Y-%m-%d"), msd.strftime("%Y-%m-%d"),
+                            tkr.strip().upper(), mchg, mnote.strip())
+                        st.cache_data.clear()
+                        st.success("Added to the realized ledger.")
+                        st.rerun()
+
+        # ── Ledger ──────────────────────────────────────────────────────────
+        st.markdown("---")
+        if rt.empty:
+            st.info("No realized transactions yet.")
+            return
+
+        fys = ["All"] + sorted(rt["FY"].unique().tolist(), reverse=True)
+        f1, f2 = st.columns([1, 3])
+        with f1:
+            fy = st.selectbox("Financial Year", fys, key=f"rz_fy_{cid}")
+        view = rt if fy == "All" else rt[rt["FY"] == fy]
+
+        if fy != "All":
+            vs = _realized_summary(view)
+            st.caption(f"**{fy}** — realized {format_inr(vs['total'])} "
+                       f"(STCG {format_inr(vs['stcg'])}, LTCG {format_inr(vs['ltcg'])}) "
+                       f"across {vs['count']} transaction(s)")
+
+        show = view.drop(columns=["ID"])
+        st.dataframe(
+            show.style
+                .map(color_pnl, subset=["Realized P/L", "Return %"])
+                .format({"Units": "{:,.2f}", "Buy Price": "₹{:,.2f}",
+                         "Sell Price": "₹{:,.2f}", "Buy Value": "₹{:,.0f}",
+                         "Sell Value": "₹{:,.0f}", "Charges": "₹{:,.0f}",
+                         "Realized P/L": "₹{:,.0f}", "Return %": "{:+.2f}%"}),
+            width="stretch", hide_index=True,
+            height=min(460, 50 + 35 * len(show)),
+        )
+
+        stamp = datetime.now().strftime("%Y%m%d")
+        safe = "".join(ch if ch.isalnum() else "_" for ch in client["name"])
+        st.download_button(
+            "⬇️ Download Realized Gains (CSV)",
+            data=show.to_csv(index=False).encode("utf-8"),
+            file_name=f"{safe}_realized_{stamp}.csv", mime="text/csv",
+            key=f"rz_dl_{cid}")
+
+        with st.expander("🗑️ Remove an entry"):
+            dopts = {f"{r['Scrip Name']} · {r['Sell Date']} · "
+                     f"{format_inr(r['Realized P/L'])}": int(r["ID"])
+                     for _, r in view.iterrows()}
+            if dopts:
+                dsel = st.selectbox("Entry", list(dopts.keys()), key=f"rz_del_{cid}")
+                st.caption("Removing a booked sale does **not** restore the "
+                           "holding — re-add it manually if needed.")
+                if st.button("🗑️ Delete entry", key=f"rz_delbtn_{cid}"):
+                    db.delete_client_realized(dopts[dsel])
+                    st.cache_data.clear()
+                    st.success("Entry removed.")
+                    st.rerun()
+
+
 def _client_settings(client: dict, cid: int):
     with st.container(border=True):
         with st.form(f"cl_set_{cid}"):
@@ -3445,11 +3761,15 @@ def _client_statement(client: dict, table: pd.DataFrame, t: dict):
             cap = f"Client Code **{client['code']}** · " + cap
         st.caption(cap)
 
-        q1, q2, q3, q4 = st.columns(4)
+        q1, q2, q3, q4, q5 = st.columns(5)
         q1.metric("Mandate", format_inr(t["mandate"]))
         q2.metric("Invested", format_inr(t["invested"]))
         q3.metric("Market Value", format_inr(t["market_value"]))
         q4.metric("Unrealised P/L", format_inr(t["pnl"]), f"{t['pnl_pct']:+.2f}%")
+        q5.metric("Realized P/L", format_inr(t["realized_pl"]))
+        if not t.get("realized_table", pd.DataFrame()).empty:
+            st.caption("The workbook includes a **Realized Gains** sheet with the "
+                       "full ledger and STCG / LTCG split.")
 
         stamp = datetime.now().strftime("%Y%m%d")
         safe = "".join(ch if ch.isalnum() else "_" for ch in client["name"])
