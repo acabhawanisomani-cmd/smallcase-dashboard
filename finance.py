@@ -46,14 +46,19 @@ def _symbol_candidates(ticker: str) -> list[str]:
     An explicit .NS/.BO suffix is honoured exactly — we must NOT fall back to
     the other exchange, because the same short code can belong to a completely
     different company there (e.g. ABSMARINE.NS and 544201.BO are unrelated).
-    A bare symbol is ambiguous, so try NSE then BSE.
+
+    NSE SME scrips carry a '-SM' suffix on Yahoo (EFFWA-SM.NS). Yahoo *also*
+    keeps a dead plain-symbol entry for many of them whose quote is frozen
+    years in the past, so '-SM.NS' must be tried as well; staleness detection
+    in _yahoo_quote_direct decides which one wins.
     """
     t = str(ticker or "").strip().upper()
     if not t:
         return []
     if has_explicit_exchange(t):
+        # '-SM' already spelled out, or a normal explicit listing
         return [t]
-    return [t + ".NS", t + ".BO"]
+    return [t + ".NS", t + "-SM.NS", t + ".BO"]
 
 
 def _yahoo_chart(symbol: str, params: dict) -> dict | None:
@@ -82,20 +87,68 @@ def _empty_quote() -> dict:
     return {"current_price": 0, "prev_close": 0, "today_change": 0, "pct_change": 0}
 
 
-def _yahoo_quote_direct(symbol: str) -> dict | None:
+# A quote whose regularMarketTime is older than this is treated as a dead
+# listing. Yahoo keeps zombie plain-symbol entries for NSE SME scrips
+# (e.g. KRISHCA.NS) frozen at a 2024 price, which must never be shown.
+STALE_QUOTE_SECONDS = 10 * 86400
+
+
+def _closes_from(res: dict) -> list[float]:
+    out: list[float] = []
+    try:
+        for c in res["indicators"]["quote"][0]["close"]:
+            if c is not None:
+                out.append(float(c))
+    except Exception:
+        pass
+    return out
+
+
+def _quote_is_stale(meta: dict) -> bool:
+    """True when Yahoo's last trade timestamp is far in the past."""
+    rmt = meta.get("regularMarketTime")
+    if not rmt:
+        return False
+    try:
+        return (time.time() - float(rmt)) > STALE_QUOTE_SECONDS
+    except (TypeError, ValueError):
+        return False
+
+
+def _yahoo_quote_direct(symbol: str, allow_stale: bool = False) -> dict | None:
     """Current quote for a fully-qualified symbol (e.g. RELIANCE.NS).
 
     Uses range=1d: with a single-day window Yahoo's meta.chartPreviousClose is
     exactly the PRIOR TRADING DAY's close — the correct reference for daily %
     change. (With a longer range it becomes the close before the whole window,
     ~a week back, which wrongly reports a multi-day move as today's change.)
-    It is also more reliable than the daily close series, which can have None
-    gaps on individual days.
+
+    Returns None for a stale listing unless allow_stale is set, so the caller
+    can try the '-SM.NS' variant first; with allow_stale the price is rebuilt
+    from the daily candles, which stay correct even when meta does not.
     """
     res = _yahoo_chart(symbol, {"range": "1d", "interval": "1d"})
     if not res:
         return None
     meta = res.get("meta") or {}
+
+    if _quote_is_stale(meta):
+        if not allow_stale:
+            return None
+        # meta is frozen, but the candle series is still maintained
+        hist = _yahoo_chart(symbol, {"range": "1mo", "interval": "1d"})
+        closes = _closes_from(hist) if hist else []
+        if not closes:
+            return None
+        current = closes[-1]
+        prev = closes[-2] if len(closes) >= 2 else current
+        change = current - prev
+        return {
+            "current_price": round(current, 2),
+            "prev_close": round(prev, 2),
+            "today_change": round(change, 2),
+            "pct_change": round((change / prev * 100) if prev else 0.0, 2),
+        }
 
     # Current price
     current = meta.get("regularMarketPrice")
@@ -115,13 +168,7 @@ def _yahoo_quote_direct(symbol: str) -> dict | None:
 
     # Fallback to the close series only if meta is incomplete
     if current <= 0 or prev <= 0:
-        closes: list[float] = []
-        try:
-            for c in res["indicators"]["quote"][0]["close"]:
-                if c is not None:
-                    closes.append(float(c))
-        except Exception:
-            closes = []
+        closes = _closes_from(res)
         if current <= 0 and closes:
             current = closes[-1]
         if prev <= 0 and len(closes) >= 2:
@@ -143,9 +190,19 @@ def _yahoo_quote_direct(symbol: str) -> dict | None:
 
 
 def _quote_with_fallback(ticker: str) -> dict:
-    """Quote a holding. Honours an explicit .NS/.BO; otherwise NSE then BSE."""
-    for sym in _symbol_candidates(ticker):
+    """Quote a holding. Honours an explicit .NS/.BO; otherwise NSE, NSE-SME, BSE.
+
+    Two passes: prefer any listing with a live quote, and only then accept a
+    stale listing (rebuilt from candles). Without this, Yahoo's zombie
+    plain-symbol entry for an SME scrip would win over the correct '-SM' one.
+    """
+    cands = _symbol_candidates(ticker)
+    for sym in cands:
         q = _yahoo_quote_direct(sym)
+        if q:
+            return q
+    for sym in cands:
+        q = _yahoo_quote_direct(sym, allow_stale=True)
         if q:
             return q
     return _empty_quote()
@@ -158,26 +215,30 @@ def resolve_ticker(ticker: str) -> dict:
 
     Returns {ok, symbol, name, exchange, price}.
     """
-    for sym in _symbol_candidates(ticker):
-        res = _yahoo_chart(sym, {"range": "1d", "interval": "1d"})
-        if not res:
-            continue
-        meta = res.get("meta") or {}
-        price = meta.get("regularMarketPrice")
-        try:
-            price = float(price) if price is not None else 0.0
-        except (TypeError, ValueError):
-            price = 0.0
-        if price <= 0:
-            continue
-        name = meta.get("longName") or meta.get("shortName") or ""
-        # Yahoo returns a junk placeholder name for some thin SME scrips
-        if name.upper().startswith(sym.split(".")[0]) and "," in name:
-            name = ""
-        return {"ok": True, "symbol": sym, "name": name,
-                "exchange": meta.get("fullExchangeName") or "", "price": round(price, 2)}
+    cands = _symbol_candidates(ticker)
+    for allow_stale in (False, True):
+        for sym in cands:
+            res = _yahoo_chart(sym, {"range": "1d", "interval": "1d"})
+            if not res:
+                continue
+            meta = res.get("meta") or {}
+            stale = _quote_is_stale(meta)
+            if stale and not allow_stale:
+                continue          # prefer the live '-SM' listing
+
+            q = _yahoo_quote_direct(sym, allow_stale=allow_stale)
+            if not q or q["current_price"] <= 0:
+                continue
+
+            name = meta.get("longName") or meta.get("shortName") or ""
+            # Dead listings carry a placeholder name like 'KRISHCA.NS,0P00…,32000'
+            if "," in name and name.upper().startswith(sym.split(".")[0].split("-")[0]):
+                name = ""
+            return {"ok": True, "symbol": sym, "name": name,
+                    "exchange": meta.get("fullExchangeName") or "",
+                    "price": q["current_price"], "stale": stale}
     return {"ok": False, "symbol": str(ticker or "").strip().upper(),
-            "name": "", "exchange": "", "price": 0.0}
+            "name": "", "exchange": "", "price": 0.0, "stale": False}
 
 
 # ── Live prices ─────────────────────────────────────────────────────────────

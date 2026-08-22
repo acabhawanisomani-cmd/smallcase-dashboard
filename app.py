@@ -3208,11 +3208,11 @@ def _client_upload_holdings(cid: int, client: dict):
         st.success(f"Read **{len(parsed)}** holdings · "
                    f"**{auto}** ticker(s) filled in automatically.")
         st.info(
-            "**BSE / SME stocks:** add **`.BO`** to the symbol — e.g. "
-            "`TRUECOLORS.BO`, `CFF.BO`, or the BSE scrip code `504092.BO`. "
-            "A plain symbol is treated as NSE first, then BSE. Use "
-            "**🔍 Verify Tickers** below to confirm each one resolves to the "
-            "right company before importing."
+            "**Exchanges:** a plain symbol is resolved automatically — NSE, "
+            "then NSE-SME (`-SM`), then BSE. For a BSE-only scrip you can be "
+            "explicit with **`.BO`** (`TRUECOLORS.BO`, `CFF.BO`, or the scrip "
+            "code `504092.BO`). Use **🔍 Verify Tickers** below to see exactly "
+            "which listing and company each symbol resolves to."
         )
 
         edited = st.data_editor(
@@ -3260,6 +3260,7 @@ def _client_upload_holdings(cid: int, client: dict):
                 rows.append({
                     "Scrip Name": r["Scrip Name"],
                     "Ticker": r["Ticker"],
+                    "Resolved Symbol": info["symbol"] if info["ok"] else "—",
                     "Resolved As": info["name"] or ("—" if info["ok"] else "NOT FOUND"),
                     "Exchange": info["exchange"] or "—",
                     "Live Price": info["price"],
