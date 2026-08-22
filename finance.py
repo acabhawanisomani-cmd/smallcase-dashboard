@@ -34,6 +34,28 @@ def _ensure_ns_suffix(ticker: str) -> str:
     return t
 
 
+def has_explicit_exchange(ticker: str) -> bool:
+    """True when the symbol already names its exchange (…​.NS / …​.BO)."""
+    t = str(ticker or "").strip().upper()
+    return t.endswith(".NS") or t.endswith(".BO")
+
+
+def _symbol_candidates(ticker: str) -> list[str]:
+    """Symbols to try, in order.
+
+    An explicit .NS/.BO suffix is honoured exactly — we must NOT fall back to
+    the other exchange, because the same short code can belong to a completely
+    different company there (e.g. ABSMARINE.NS and 544201.BO are unrelated).
+    A bare symbol is ambiguous, so try NSE then BSE.
+    """
+    t = str(ticker or "").strip().upper()
+    if not t:
+        return []
+    if has_explicit_exchange(t):
+        return [t]
+    return [t + ".NS", t + ".BO"]
+
+
 def _yahoo_chart(symbol: str, params: dict) -> dict | None:
     """Call Yahoo's chart endpoint and return result[0] dict, or None on failure.
 
@@ -121,13 +143,41 @@ def _yahoo_quote_direct(symbol: str) -> dict | None:
 
 
 def _quote_with_fallback(ticker: str) -> dict:
-    """Try .NS first, then .BO (BSE) as fallback for SME / BSE-only stocks."""
-    base = ticker.strip().upper().replace(".NS", "").replace(".BO", "")
-    for suffix in (".NS", ".BO"):
-        q = _yahoo_quote_direct(base + suffix)
+    """Quote a holding. Honours an explicit .NS/.BO; otherwise NSE then BSE."""
+    for sym in _symbol_candidates(ticker):
+        q = _yahoo_quote_direct(sym)
         if q:
             return q
     return _empty_quote()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def resolve_ticker(ticker: str) -> dict:
+    """Check what a symbol actually resolves to, so a wrong exchange or a
+    same-named different company can be spotted before it is saved.
+
+    Returns {ok, symbol, name, exchange, price}.
+    """
+    for sym in _symbol_candidates(ticker):
+        res = _yahoo_chart(sym, {"range": "1d", "interval": "1d"})
+        if not res:
+            continue
+        meta = res.get("meta") or {}
+        price = meta.get("regularMarketPrice")
+        try:
+            price = float(price) if price is not None else 0.0
+        except (TypeError, ValueError):
+            price = 0.0
+        if price <= 0:
+            continue
+        name = meta.get("longName") or meta.get("shortName") or ""
+        # Yahoo returns a junk placeholder name for some thin SME scrips
+        if name.upper().startswith(sym.split(".")[0]) and "," in name:
+            name = ""
+        return {"ok": True, "symbol": sym, "name": name,
+                "exchange": meta.get("fullExchangeName") or "", "price": round(price, 2)}
+    return {"ok": False, "symbol": str(ticker or "").strip().upper(),
+            "name": "", "exchange": "", "price": 0.0}
 
 
 # ── Live prices ─────────────────────────────────────────────────────────────
@@ -153,16 +203,17 @@ def _fetch_live_data_cached(tickers: tuple) -> dict[str, dict]:
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_open_price(ticker: str, target_date: str) -> float | None:
-    """Opening price on a date (or the next trading day). Tries NSE then BSE."""
-    base = ticker.strip().upper().replace(".NS", "").replace(".BO", "")
+    """Opening price on a date (or the next trading day).
+
+    Honours an explicit .NS/.BO; a bare symbol tries NSE then BSE."""
     try:
         dt = datetime.strptime(target_date, "%Y-%m-%d").date()
     except Exception:
         return None
     p1 = int(datetime(dt.year, dt.month, dt.day).timestamp())
     p2 = p1 + 8 * 86400
-    for suffix in (".NS", ".BO"):
-        res = _yahoo_chart(base + suffix,
+    for sym in _symbol_candidates(ticker):
+        res = _yahoo_chart(sym,
                            {"period1": p1, "period2": p2, "interval": "1d"})
         if not res:
             continue
@@ -205,12 +256,13 @@ def fetch_stock_info(ticker: str) -> dict:
 def _fetch_stock_info_cached(ticker: str) -> dict:
     """Company name from Yahoo chart meta. Sector/industry/beta not available
     via the public chart endpoint — returned empty (user can fill manually)."""
-    ns = _ensure_ns_suffix(ticker)
     name = ticker
-    res = _yahoo_chart(ns, {"range": "1d", "interval": "1d"})
-    if res:
-        meta = res.get("meta") or {}
-        name = meta.get("longName") or meta.get("shortName") or ticker
+    for sym in _symbol_candidates(ticker):
+        res = _yahoo_chart(sym, {"range": "1d", "interval": "1d"})
+        if res:
+            meta = res.get("meta") or {}
+            name = meta.get("longName") or meta.get("shortName") or ticker
+            break
     return {"beta": None, "dividend_yield": 0, "sector": "", "industry": "", "long_name": name}
 
 

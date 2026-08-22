@@ -3201,15 +3201,19 @@ def _client_upload_holdings(cid: int, client: dict):
         sugg = _suggest_tickers(parsed["Scrip Name"].tolist())
         parsed = parsed.copy()
         parsed.insert(0, "Include", True)
-        parsed.insert(2, "NSE Ticker", [sugg.get(n, "") for n in parsed["Scrip Name"]])
+        parsed.insert(2, "Ticker", [sugg.get(n, "") for n in parsed["Scrip Name"]])
         parsed["Buy Value"] = (parsed["Quantity"] * parsed["Buy Price"]).round(2)
 
-        auto = sum(1 for v in parsed["NSE Ticker"] if v)
+        auto = sum(1 for v in parsed["Ticker"] if v)
         st.success(f"Read **{len(parsed)}** holdings · "
                    f"**{auto}** ticker(s) filled in automatically.")
-        if auto < len(parsed):
-            st.caption("Fill the blank **NSE Ticker** cells below — they're "
-                       "remembered for every future upload.")
+        st.info(
+            "**BSE / SME stocks:** add **`.BO`** to the symbol — e.g. "
+            "`TRUECOLORS.BO`, `CFF.BO`, or the BSE scrip code `504092.BO`. "
+            "A plain symbol is treated as NSE first, then BSE. Use "
+            "**🔍 Verify Tickers** below to confirm each one resolves to the "
+            "right company before importing."
+        )
 
         edited = st.data_editor(
             parsed, hide_index=True, width="stretch", num_rows="fixed",
@@ -3217,9 +3221,10 @@ def _client_upload_holdings(cid: int, client: dict):
             column_config={
                 "Include": st.column_config.CheckboxColumn("Include", width="small"),
                 "Scrip Name": st.column_config.TextColumn(disabled=True, width="large"),
-                "NSE Ticker": st.column_config.TextColumn(
-                    "NSE Ticker", width="small",
-                    help="Symbol without .NS — e.g. SHILPAMED, UNIVCABLES"),
+                "Ticker": st.column_config.TextColumn(
+                    "Ticker", width="small",
+                    help="NSE: plain symbol (SHILPAMED). BSE/SME: add .BO "
+                         "(TRUECOLORS.BO) or use the scrip code (504092.BO)."),
                 "Quantity": st.column_config.NumberColumn(format="%.0f", width="small"),
                 "Buy Price": st.column_config.NumberColumn(format="₹%.2f"),
                 "Market Price": st.column_config.NumberColumn(
@@ -3230,13 +3235,63 @@ def _client_upload_holdings(cid: int, client: dict):
         )
 
         take = edited[edited["Include"] & (edited["Quantity"] > 0)].copy()
-        take["NSE Ticker"] = take["NSE Ticker"].astype(str).str.strip().str.upper()
-        missing = take[take["NSE Ticker"] == ""]
+        take["Ticker"] = take["Ticker"].astype(str).str.strip().str.upper()
+        missing = take[take["Ticker"] == ""]
         invested = float((take["Quantity"] * take["Buy Price"]).sum()) if not take.empty else 0.0
 
         if not missing.empty:
             st.warning(f"⚠️ {len(missing)} stock(s) still need a ticker: "
                        + ", ".join(missing["Scrip Name"].head(6).tolist()))
+
+        # ── Verify ──────────────────────────────────────────────────────────
+        vkey = f"cl_verify_{cid}"
+        if st.button("🔍 Verify Tickers", key=f"cl_vbtn_{cid}",
+                     disabled=take.empty,
+                     help="Look each symbol up and show the company and price it "
+                          "resolves to — catches wrong-exchange matches"):
+            rows = []
+            bar = st.progress(0.0, text="Verifying…")
+            todo = take[take["Ticker"] != ""]
+            for i, (_, r) in enumerate(todo.iterrows(), start=1):
+                info = fin.resolve_ticker(r["Ticker"])
+                sheet_px = float(r["Market Price"] or 0)
+                drift = (abs(info["price"] - sheet_px) / sheet_px * 100
+                         if info["ok"] and sheet_px > 0 else None)
+                rows.append({
+                    "Scrip Name": r["Scrip Name"],
+                    "Ticker": r["Ticker"],
+                    "Resolved As": info["name"] or ("—" if info["ok"] else "NOT FOUND"),
+                    "Exchange": info["exchange"] or "—",
+                    "Live Price": info["price"],
+                    "Sheet Price": sheet_px,
+                    "Diff %": round(drift, 1) if drift is not None else None,
+                })
+            bar.empty()
+            st.session_state[vkey] = rows
+
+        vrows = st.session_state.get(vkey)
+        if vrows:
+            vdf = pd.DataFrame(vrows)
+            bad = vdf[vdf["Resolved As"] == "NOT FOUND"]
+            odd = vdf[(vdf["Diff %"].notna()) & (vdf["Diff %"] > 25)]
+            st.markdown("**Verification**")
+            st.dataframe(
+                vdf.style.format({"Live Price": "₹{:,.2f}", "Sheet Price": "₹{:,.2f}",
+                                  "Diff %": "{:.1f}%"}, na_rep="—"),
+                width="stretch", hide_index=True,
+            )
+            if not bad.empty:
+                st.error("❌ Not found on NSE or BSE: "
+                         + ", ".join(bad["Ticker"].tolist())
+                         + " — try the `.BO` suffix or the BSE scrip code.")
+            if not odd.empty:
+                st.warning(
+                    "⚠️ Live price differs from the sheet by more than 25% for: "
+                    + ", ".join(odd["Ticker"].tolist())
+                    + ". Usually a wrong-exchange match (a different company with "
+                      "the same code) — or simply a stale sheet. Worth a check.")
+            if bad.empty and odd.empty:
+                st.success("✅ All tickers resolved and prices look consistent.")
 
         mandate = float(client.get("mandate_amount") or 0)
         i1, i2 = st.columns([3, 1])
@@ -3249,17 +3304,18 @@ def _client_upload_holdings(cid: int, client: dict):
             ok = missing.empty and not take.empty
             if st.button("✅ Import & Replace", key=f"cl_doup_{cid}",
                          type="primary", disabled=not ok, use_container_width=True):
-                rows = [{"ticker": r["NSE Ticker"], "scrip_name": r["Scrip Name"],
+                rows = [{"ticker": r["Ticker"], "scrip_name": r["Scrip Name"],
                          "units": float(r["Quantity"]), "buy_price": float(r["Buy Price"]),
                          "buy_date": date.today().strftime("%Y-%m-%d")}
                         for _, r in take.iterrows()]
                 try:
                     db.replace_client_holdings(cid, rows)
                     db.save_ticker_mappings(
-                        {r["Scrip Name"]: r["NSE Ticker"] for _, r in take.iterrows()})
+                        {r["Scrip Name"]: r["Ticker"] for _, r in take.iterrows()})
                 except Exception as e:
                     st.error(f"Import failed — nothing was changed: {e}")
                     return
+                st.session_state.pop(vkey, None)
                 st.cache_data.clear()
                 st.success(f"Imported {len(rows)} holdings for {client['name']}.")
                 st.rerun()
