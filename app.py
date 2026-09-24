@@ -1041,6 +1041,8 @@ _nav_btn("📊 Mutual Funds", "nav_mf")
 _nav_btn("📰 News", "nav_news")
 # Advisory clients — mandates, deployment and valuation
 _nav_btn("👥 Clients", "nav_clients")
+# Weekly subscriber update — this week's changes + rationale
+_nav_btn("📣 Weekly Update", "nav_weekly")
 
 # Work tracker — label carries the pending count so it's visible on every page
 _work_pending = work_pending_count()
@@ -2910,6 +2912,311 @@ def _render_folio_news(sc: dict, sc_id: int, holdings: pd.DataFrame):
             _news_block(name, items)
 
 
+# ── Weekly Subscriber Update ────────────────────────────────────────────────
+
+CHANGE_ORDER = {"NEW ENTRY": 0, "ADD": 1, "TRIM": 2, "EXIT": 3}
+CHANGE_ICON = {"NEW ENTRY": "🟢", "ADD": "➕", "TRIM": "➖", "EXIT": "🔴"}
+
+
+def _week_bounds(d: date) -> tuple[date, date]:
+    start = d - timedelta(days=d.weekday())          # Monday
+    return start, start + timedelta(days=6)          # Sunday
+
+
+def _updates_available() -> bool:
+    return hasattr(db, "get_changes_between")
+
+
+def classify_changes(df: pd.DataFrame) -> pd.DataFrame:
+    """Label each trade NEW ENTRY / ADD / TRIM / EXIT for the subscriber note.
+
+    NEW ENTRY — first buy of a holding whose buy date falls on that trade
+    EXIT      — sell that closed the holding (inactive, exit date = trade date)
+    ADD/TRIM  — everything else
+    """
+    if df.empty:
+        return df.assign(Change=[])
+    df = df.copy()
+    first_buy = (df[df["action"] == "BUY"].sort_values("id")
+                 .groupby("holding_id")["id"].first().to_dict())
+
+    def label(r):
+        act = str(r["action"]).upper()
+        tdate = str(r["transaction_date"])[:10]
+        if act == "SELL":
+            if (r["is_active"] == 0 or str(r["is_active"]) == "0") and \
+                    str(r["exit_date"] or "")[:10] == tdate:
+                return "EXIT"
+            return "TRIM"
+        if str(r["buy_date"] or "")[:10] == tdate and first_buy.get(r["holding_id"]) == r["id"]:
+            return "NEW ENTRY"
+        return "ADD"
+
+    df["Change"] = df.apply(label, axis=1)
+    return df
+
+
+def build_update_text(week_start: date, week_end: date, commentary: str,
+                      changes: pd.DataFrame, notes: pd.DataFrame,
+                      groups: list[str]) -> str:
+    """Subscriber-ready weekly note in plain markdown."""
+    lines = [f"# Weekly Portfolio Update",
+             f"**{week_start.strftime('%d %b')} – {week_end.strftime('%d %b %Y')}**", ""]
+    if commentary.strip():
+        lines += [commentary.strip(), ""]
+
+    any_change = False
+    for grp in groups:
+        g_ch = changes[changes["group_name"] == grp] if not changes.empty else changes
+        g_nt = notes[notes["group_name"] == grp] if not notes.empty else notes
+        if g_ch.empty and g_nt.empty:
+            continue
+        any_change = True
+        lines += [f"## {grp}", ""]
+        folios = sorted(set(g_ch["folio"].tolist() if not g_ch.empty else []) |
+                        set(g_nt["folio"].tolist() if not g_nt.empty else []))
+        for folio in folios:
+            lines += [f"### {folio}", ""]
+            fc = g_ch[g_ch["folio"] == folio] if not g_ch.empty else g_ch
+            if not fc.empty:
+                fc = fc.assign(_o=fc["Change"].map(CHANGE_ORDER)).sort_values(
+                    ["_o", "transaction_date"])
+                for _, r in fc.iterrows():
+                    name = r["scrip_name"] or r["ticker"]
+                    line = f"**{r['Change']}** — {name}"
+                    if r["price"]:
+                        line += f" @ ₹{float(r['price']):,.2f}"
+                    if r["Change"] in ("NEW ENTRY", "ADD") and r["weightage"]:
+                        line += f" (weight {float(r['weightage']):.1f}%)"
+                    lines.append("- " + line)
+                    if str(r["rationale"]).strip():
+                        lines.append(f"  - *Rationale:* {str(r['rationale']).strip()}")
+            fn = g_nt[g_nt["folio"] == folio] if not g_nt.empty else g_nt
+            for _, n in fn.iterrows():
+                lines.append(f"- **UPDATE** — {n['change_text']}")
+                if str(n["rationale"]).strip():
+                    lines.append(f"  - *Rationale:* {str(n['rationale']).strip()}")
+            lines.append("")
+
+    if not any_change:
+        lines += ["No changes were made to the portfolios this week.", ""]
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def render_weekly_update():
+    st.title("📣 Weekly Update")
+    st.caption("Every change made to your Smallcase and App portfolios this week, "
+               "with room to note the rationale as you go — so the subscriber "
+               "update is ready to send at week's end.")
+
+    if not _updates_available():
+        st.error("📣 Weekly Update module not loaded yet.")
+        st.markdown("The app is running a cached copy of `database.py`. It clears "
+                    "once Streamlit Cloud finishes rebuilding — if it persists, "
+                    "open **Manage app → ⋮ → Reboot app**.")
+        return
+
+    # ── Week + scope ────────────────────────────────────────────────────────
+    today = date.today()
+    weeks = []
+    for back in range(0, 12):
+        ws, we = _week_bounds(today - timedelta(weeks=back))
+        tag = " (this week)" if back == 0 else " (last week)" if back == 1 else ""
+        weeks.append((ws, we, f"{ws.strftime('%d %b')} – {we.strftime('%d %b %Y')}{tag}"))
+
+    all_groups = sorted({(s.get("group_name") or "").strip() for s in all_sc
+                         if (s.get("group_name") or "").strip()})
+    default_groups = [g for g in all_groups
+                      if "smallcase" in g.lower() or "app" in g.lower()] or all_groups
+
+    c1, c2, c3 = st.columns([2, 3, 1])
+    with c1:
+        wi = st.selectbox("Week", range(len(weeks)), format_func=lambda i: weeks[i][2],
+                          key="wu_week")
+    with c2:
+        groups = st.multiselect("Groups", all_groups, default=default_groups, key="wu_groups")
+    with c3:
+        st.markdown("<br>", unsafe_allow_html=True)
+        show_liq = st.toggle("LIQUIDCASE", value=False, key="wu_liq",
+                             help="Include the automatic cash-sweep adjustments")
+
+    ws, we, _ = weeks[wi]
+    wkey = period_key("weekly", ws)
+    s, e = ws.strftime("%Y-%m-%d"), we.strftime("%Y-%m-%d")
+
+    try:
+        changes = db.get_changes_between(s, e)
+        notes = db.get_portfolio_notes(s, e)
+    except Exception as ex:
+        st.error(f"Could not load changes: {ex}")
+        return
+
+    if not changes.empty:
+        changes = changes[changes["group_name"].isin(groups)]
+        if not show_liq:
+            changes = changes[changes["ticker"].str.upper() != db.RESIDUAL_TICKER]
+        changes = classify_changes(changes)
+    if not notes.empty:
+        notes = notes[notes["group_name"].isin(groups)]
+
+    # ── Summary ─────────────────────────────────────────────────────────────
+    n_new = int((changes["Change"] == "NEW ENTRY").sum()) if not changes.empty else 0
+    n_exit = int((changes["Change"] == "EXIT").sum()) if not changes.empty else 0
+    n_adj = int(changes["Change"].isin(["ADD", "TRIM"]).sum()) if not changes.empty else 0
+    missing = 0
+    if not changes.empty:
+        missing += int((changes["rationale"].astype(str).str.strip() == "").sum())
+    if not notes.empty:
+        missing += int((notes["rationale"].astype(str).str.strip() == "").sum())
+
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
+        metric_card("New Entries", str(n_new), "profit" if n_new else "neutral")
+    with m2:
+        metric_card("Exits", str(n_exit), "loss" if n_exit else "neutral")
+    with m3:
+        metric_card("Adds / Trims", str(n_adj))
+    with m4:
+        metric_card("Rationale Missing", str(missing), "loss" if missing else "profit")
+
+    st.markdown("---")
+
+    # ── Changes, folio by folio, with editable rationale ───────────────────
+    st.subheader("Changes this week")
+    if changes.empty and notes.empty:
+        st.info("No changes recorded for these groups in the selected week. Trades "
+                "made through Add Stock, Add More, Reduce and Exit appear here "
+                "automatically; use **➕ Add a manual update** for anything else.")
+
+    for grp in groups:
+        g_ch = changes[changes["group_name"] == grp] if not changes.empty else changes
+        if g_ch.empty:
+            continue
+        st.markdown(f"#### 📂 {grp}")
+        for folio in sorted(g_ch["folio"].unique()):
+            fc = g_ch[g_ch["folio"] == folio].copy()
+            fc = fc.assign(_o=fc["Change"].map(CHANGE_ORDER)).sort_values(
+                ["_o", "transaction_date", "id"])
+            view = pd.DataFrame({
+                "ID": fc["id"].astype(int),
+                "Date": fc["transaction_date"].astype(str).str[:10],
+                "Change": [f"{CHANGE_ICON[c]} {c}" for c in fc["Change"]],
+                "Stock": fc["scrip_name"].fillna(fc["ticker"]),
+                "Units": fc["units"].astype(float),
+                "Price": fc["price"].astype(float),
+                "Weight %": fc["weightage"].fillna(0).astype(float),
+                "Rationale": fc["rationale"].fillna("").astype(str),
+            })
+            st.markdown(f"**{folio}**")
+            edited = st.data_editor(
+                view, hide_index=True, width="stretch", num_rows="fixed",
+                key=f"wu_ed_{wkey}_{folio}",
+                column_config={
+                    "ID": None,
+                    "Date": st.column_config.TextColumn(disabled=True, width="small"),
+                    "Change": st.column_config.TextColumn(disabled=True, width="small"),
+                    "Stock": st.column_config.TextColumn(disabled=True, width="medium"),
+                    "Units": st.column_config.NumberColumn(disabled=True, format="%.2f"),
+                    "Price": st.column_config.NumberColumn(disabled=True, format="₹%.2f"),
+                    "Weight %": st.column_config.NumberColumn(
+                        disabled=True, format="%.1f%%",
+                        help="Current weight of the holding"),
+                    "Rationale": st.column_config.TextColumn(
+                        "Rationale ✏️", width="large",
+                        help="Why this change was made — goes into the subscriber note"),
+                },
+            )
+            before = dict(zip(view["ID"], view["Rationale"]))
+            dirty = {int(i): str(r) for i, r in zip(edited["ID"], edited["Rationale"])
+                     if str(r) != str(before.get(i, ""))}
+            if st.button(f"💾 Save rationale{f' ({len(dirty)})' if dirty else ''}",
+                         key=f"wu_save_{wkey}_{folio}", disabled=not dirty):
+                for tid, txt in dirty.items():
+                    db.set_transaction_rationale(tid, txt.strip())
+                st.success(f"Saved {len(dirty)} rationale(s) for {folio}.")
+                st.rerun()
+
+    # ── Manual updates (changes that aren't trades) ────────────────────────
+    st.markdown("---")
+    st.subheader("Manual updates")
+    st.caption("For changes that don't create a trade — a weight tweak, a stop-loss "
+               "revision, a stock placed on watch.")
+
+    scope_folios = [x for x in all_sc if (x.get("group_name") or "").strip() in groups]
+    with st.expander("➕ Add a manual update", expanded=False):
+        if not scope_folios:
+            st.info("No folios in the selected groups.")
+        else:
+            with st.form("wu_note_form"):
+                n1, n2 = st.columns([2, 1])
+                with n1:
+                    nf = st.selectbox("Folio", [x["name"] for x in scope_folios])
+                with n2:
+                    default_d = today if ws <= today <= we else we
+                    nd = st.date_input("Date", value=default_d, min_value=ws, max_value=we)
+                ntext = st.text_input("What changed *",
+                                      placeholder="e.g. Raised weight in Shilpa Medicare from 6% to 9%")
+                nrat = st.text_area("Rationale", height=80)
+                if st.form_submit_button("Add update", type="primary"):
+                    if not ntext.strip():
+                        st.error("Describe what changed.")
+                    else:
+                        sid = next(x["id"] for x in scope_folios if x["name"] == nf)
+                        db.add_portfolio_note(sid, nd.strftime("%Y-%m-%d"),
+                                              ntext.strip(), nrat.strip())
+                        st.success("Added.")
+                        st.rerun()
+
+    if not notes.empty:
+        for _, n in notes.iterrows():
+            with st.container(border=True):
+                h1, h2 = st.columns([5, 1])
+                with h1:
+                    st.markdown(f"**{n['folio']}** · {str(n['note_date'])[:10]} — "
+                                f"{n['change_text']}")
+                with h2:
+                    if st.button("🗑️", key=f"wu_ndel_{n['id']}", help="Delete this update"):
+                        db.delete_portfolio_note(int(n["id"]))
+                        st.rerun()
+                new_r = st.text_area("Rationale", value=n["rationale"] or "",
+                                     key=f"wu_nrat_{n['id']}", height=68,
+                                     label_visibility="collapsed",
+                                     placeholder="Rationale…")
+                if new_r != (n["rationale"] or ""):
+                    if st.button("💾 Save", key=f"wu_nsave_{n['id']}"):
+                        db.update_portfolio_note(int(n["id"]), rationale=new_r.strip())
+                        st.rerun()
+
+    # ── Week commentary ─────────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("Market commentary")
+    saved_c = db.get_weekly_commentary(wkey)
+    comm = st.text_area("Opening note for subscribers (optional)", value=saved_c,
+                        height=120, key=f"wu_comm_{wkey}",
+                        placeholder="e.g. Markets consolidated this week; we used the "
+                                    "dip to add to quality mid-caps…")
+    if comm != saved_c:
+        if st.button("💾 Save commentary", key=f"wu_comm_save_{wkey}"):
+            db.save_weekly_commentary(wkey, comm.strip())
+            st.success("Saved.")
+            st.rerun()
+
+    # ── Draft ───────────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("📝 Subscriber update — draft")
+    if missing:
+        st.warning(f"⚠️ {missing} change(s) have no rationale yet — they'll go out "
+                   f"without an explanation.")
+    text = build_update_text(ws, we, saved_c, changes, notes, groups)
+    with st.container(border=True):
+        st.markdown(text)
+    st.caption("Plain-text version — select all and copy, or download:")
+    st.code(text, language="markdown")
+    st.download_button("⬇️ Download update (.md)", data=text.encode("utf-8"),
+                       file_name=f"weekly_update_{s}.md", mime="text/markdown",
+                       key=f"wu_dl_{wkey}")
+
+
 # ── Advisory Clients ────────────────────────────────────────────────────────
 
 def _clients_available() -> bool:
@@ -4338,6 +4645,8 @@ elif nav == "👥 Clients":
     render_clients()
 elif nav == "✅ Work Tracker":
     render_work_tracker()
+elif nav == "📣 Weekly Update":
+    render_weekly_update()
 else:
     # Find the matching smallcase
     for sc in all_sc:

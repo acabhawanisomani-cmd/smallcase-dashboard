@@ -396,11 +396,53 @@ def init_db():
             )
         """)
 
+    # ── Weekly subscriber update ────────────────────────────────────────────
+    # Rationale for automatically-recorded trades lives on transactions
+    # (see migration below). These two tables hold the week-level commentary
+    # and changes that don't create a transaction (e.g. a weight tweak).
+    if _USE_PG:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS weekly_updates (
+                week_key TEXT PRIMARY KEY,
+                commentary TEXT DEFAULT '',
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS portfolio_notes (
+                id SERIAL PRIMARY KEY,
+                smallcase_id INTEGER NOT NULL REFERENCES smallcases(id) ON DELETE CASCADE,
+                note_date TEXT NOT NULL,
+                change_text TEXT NOT NULL,
+                rationale TEXT DEFAULT '',
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+    else:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS weekly_updates (
+                week_key TEXT PRIMARY KEY,
+                commentary TEXT DEFAULT '',
+                updated_at TEXT DEFAULT (datetime('now','localtime'))
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS portfolio_notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                smallcase_id INTEGER NOT NULL REFERENCES smallcases(id) ON DELETE CASCADE,
+                note_date TEXT NOT NULL,
+                change_text TEXT NOT NULL,
+                rationale TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now','localtime'))
+            )
+        """)
+
     # ── Migrations: add columns that didn't exist in older schema ──
     try:
         if _USE_PG:
             cur.execute("ALTER TABLE holdings ADD COLUMN IF NOT EXISTS stop_loss DOUBLE PRECISION DEFAULT 0")
             cur.execute("ALTER TABLE smallcases ADD COLUMN IF NOT EXISTS group_name TEXT DEFAULT ''")
+            cur.execute("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS rationale TEXT DEFAULT ''")
         else:
             cur.execute("PRAGMA table_info(holdings)")
             h_cols = [r[1] for r in cur.fetchall()]
@@ -410,6 +452,10 @@ def init_db():
             s_cols = [r[1] for r in cur.fetchall()]
             if "group_name" not in s_cols:
                 cur.execute("ALTER TABLE smallcases ADD COLUMN group_name TEXT DEFAULT ''")
+            cur.execute("PRAGMA table_info(transactions)")
+            t_cols = [r[1] for r in cur.fetchall()]
+            if "rationale" not in t_cols:
+                cur.execute("ALTER TABLE transactions ADD COLUMN rationale TEXT DEFAULT ''")
     except Exception:
         pass  # Column already exists — ignore
 
@@ -858,6 +904,124 @@ def log_transaction(holding_id: int, smallcase_id: int, ticker: str,
         f"VALUES ({_ph(7)})",
         (holding_id, smallcase_id, ticker, action, units, price, txn_date)
     )
+    conn.commit()
+    conn.close()
+
+
+# ── Weekly subscriber update ────────────────────────────────────────────────
+
+def get_changes_between(start: str, end: str) -> pd.DataFrame:
+    """Every recorded trade across all folios between two dates (inclusive),
+    with the folio, group and holding details needed to describe it."""
+    conn = get_connection()
+    ph = _ph()
+    df = pd.read_sql_query(
+        f"""
+        SELECT t.id, t.smallcase_id, t.holding_id, t.ticker, t.action, t.units,
+               t.price, t.transaction_date,
+               COALESCE(t.rationale, '') AS rationale,
+               s.name AS folio, COALESCE(s.group_name, '') AS group_name,
+               h.scrip_name, h.weightage, h.is_active, h.exit_date, h.buy_date
+        FROM transactions t
+        JOIN smallcases s ON s.id = t.smallcase_id
+        LEFT JOIN holdings h ON h.id = t.holding_id
+        WHERE t.transaction_date >= {ph} AND t.transaction_date <= {ph}
+        ORDER BY s.group_name, s.name, t.transaction_date, t.id
+        """,
+        conn, params=(start, end),
+    )
+    conn.close()
+    return df
+
+
+def set_transaction_rationale(transaction_id: int, rationale: str):
+    conn = get_connection()
+    ph = _ph()
+    conn.cursor().execute(
+        f"UPDATE transactions SET rationale = {ph} WHERE id = {ph}",
+        (rationale, transaction_id))
+    conn.commit()
+    conn.close()
+
+
+def get_portfolio_notes(start: str, end: str) -> pd.DataFrame:
+    conn = get_connection()
+    ph = _ph()
+    df = pd.read_sql_query(
+        f"""
+        SELECT n.id, n.smallcase_id, n.note_date, n.change_text, n.rationale,
+               s.name AS folio, COALESCE(s.group_name, '') AS group_name
+        FROM portfolio_notes n JOIN smallcases s ON s.id = n.smallcase_id
+        WHERE n.note_date >= {ph} AND n.note_date <= {ph}
+        ORDER BY s.group_name, s.name, n.note_date, n.id
+        """,
+        conn, params=(start, end),
+    )
+    conn.close()
+    return df
+
+
+def add_portfolio_note(smallcase_id: int, note_date: str, change_text: str,
+                       rationale: str = "") -> int:
+    conn = get_connection()
+    cur = conn.cursor()
+    cols = "(smallcase_id, note_date, change_text, rationale)"
+    if _USE_PG:
+        cur.execute(f"INSERT INTO portfolio_notes {cols} VALUES ({_ph(4)}) RETURNING id",
+                    (smallcase_id, note_date, change_text, rationale))
+    else:
+        cur.execute(f"INSERT INTO portfolio_notes {cols} VALUES ({_ph(4)})",
+                    (smallcase_id, note_date, change_text, rationale))
+    nid = _last_id(cur, "portfolio_notes")
+    conn.commit()
+    conn.close()
+    return nid
+
+
+def update_portfolio_note(note_id: int, **kwargs):
+    if not kwargs:
+        return
+    conn = get_connection()
+    ph = _ph()
+    sets = ", ".join(f"{k} = {ph}" for k in kwargs)
+    conn.cursor().execute(f"UPDATE portfolio_notes SET {sets} WHERE id = {ph}",
+                          list(kwargs.values()) + [note_id])
+    conn.commit()
+    conn.close()
+
+
+def delete_portfolio_note(note_id: int):
+    conn = get_connection()
+    conn.cursor().execute(f"DELETE FROM portfolio_notes WHERE id = {_ph()}", (note_id,))
+    conn.commit()
+    conn.close()
+
+
+def get_weekly_commentary(week_key: str) -> str:
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(f"SELECT commentary FROM weekly_updates WHERE week_key = {_ph()}",
+                (week_key,))
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return ""
+    return (row[0] if isinstance(row, tuple) else row["commentary"]) or ""
+
+
+def save_weekly_commentary(week_key: str, commentary: str):
+    conn = get_connection()
+    cur = conn.cursor()
+    if _USE_PG:
+        cur.execute(
+            "INSERT INTO weekly_updates (week_key, commentary) VALUES (%s, %s) "
+            "ON CONFLICT (week_key) DO UPDATE SET commentary = EXCLUDED.commentary, "
+            "updated_at = NOW()", (week_key, commentary))
+    else:
+        cur.execute(
+            "INSERT INTO weekly_updates (week_key, commentary) VALUES (?, ?) "
+            "ON CONFLICT(week_key) DO UPDATE SET commentary = excluded.commentary",
+            (week_key, commentary))
     conn.commit()
     conn.close()
 
