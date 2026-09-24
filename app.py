@@ -606,6 +606,44 @@ def build_portfolio_excel(table: pd.DataFrame, sc_name: str,
     return buf.getvalue()
 
 
+SMALLCASE_GROUP = "smallcase"   # groups whose investable amount follows the platform rule
+
+
+def uses_min_investable(sc: dict) -> bool:
+    return (sc.get("group_name") or "").strip().lower() == SMALLCASE_GROUP
+
+
+def smallcase_min_investable(holdings_df: pd.DataFrame) -> dict | None:
+    """Smallcase platform's minimum investment amount.
+
+    Every constituent must be buyable as at least one share, so each stock
+    needs  CMP / weight  of capital; the largest of those is the minimum.
+    LIQUIDCASE is excluded: its weight here is our cash-sweep residual (often a
+    fraction of a percent), which would otherwise inflate the figure absurdly.
+    """
+    if holdings_df is None or holdings_df.empty:
+        return None
+    h = holdings_df[(holdings_df["weightage"] > 0) &
+                    (holdings_df["ticker"].str.upper() != db.RESIDUAL_TICKER)]
+    if h.empty:
+        return None
+    live = fin.fetch_live_data(h["ticker"].tolist())
+    best = None
+    for _, r in h.iterrows():
+        q = live.get(r["ticker"], fin._empty_quote())
+        price = q["current_price"] if q["current_price"] > 0 else float(r["buy_price"] or 0)
+        if price <= 0:
+            continue
+        need = price / (float(r["weightage"]) / 100)
+        if best is None or need > best["amount"]:
+            best = {"amount": need, "ticker": r["ticker"], "name": r["scrip_name"],
+                    "price": price, "weight": float(r["weightage"])}
+    if best:
+        import math
+        best["amount"] = float(math.ceil(best["amount"]))
+    return best
+
+
 def build_holdings_table(holdings_df: pd.DataFrame, total_amount: float,
                          is_design: bool = False) -> pd.DataFrame:
     """Build the full calculated holdings table with live data."""
@@ -1701,24 +1739,66 @@ def render_smallcase(sc: dict):
     st.title(f"{sc['name']}  ·  {mode_badge}")
     st.caption(sc["description"])
 
+    _rename_box = st.popover("✏️ Rename folio") if hasattr(st, "popover") \
+        else st.expander("✏️ Rename folio")
+    with _rename_box:
+        new_name = st.text_input("New name", value=sc["name"], key=f"rename_{sc_id}")
+        if st.button("💾 Save name", key=f"rename_save_{sc_id}"):
+            nn = new_name.strip()
+            if not nn:
+                st.error("Name can't be empty.")
+            elif nn != sc["name"]:
+                if any(s["name"] == nn for s in all_sc if s["id"] != sc_id):
+                    st.error("Another folio already has that name.")
+                else:
+                    db.update_smallcase(sc_id, name=nn)
+                    icon = "🧪" if is_design else "📁"
+                    st.session_state["nav"] = f"{icon} {nn}"
+                    st.rerun()
+
     # Settings row
     col_s1, col_s2, col_s3, col_s4, col_s5 = st.columns([2, 1, 1, 1, 1])
     with col_s1:
-        new_amount = st.number_input(
-            "Total Investable Amount (₹)",
-            value=float(sc["total_investable_amount"]),
-            min_value=0.0, step=10000.0, key=f"amt_{sc_id}",
-        )
-        if new_amount != sc["total_investable_amount"]:
-            db.update_smallcase(sc_id, total_investable_amount=new_amount)
-            st.rerun()
+        auto_min = None
+        if uses_min_investable(sc):
+            auto_on = st.toggle(
+                "Auto: smallcase minimum investment", value=True, key=f"amt_auto_{sc_id}",
+                help="Largest of CMP ÷ weight across constituents — the least "
+                     "capital that buys at least one share of every stock. "
+                     "LIQUIDCASE is excluded. Recomputed with live prices.")
+            if auto_on:
+                auto_min = smallcase_min_investable(db.get_holdings(sc_id))
+
+        if auto_min:
+            new_amount = auto_min["amount"]
+            st.markdown(
+                f"<div style='font-size:13px;color:#8899a6;margin-top:-4px;'>"
+                f"Total Investable Amount</div>"
+                f"<div style='font-size:24px;font-weight:700;color:#f5e6a8;'>"
+                f"₹{new_amount:,.0f}</div>"
+                f"<div style='font-size:11.5px;color:#8899a6;'>set by "
+                f"<b>{auto_min['name']}</b> — ₹{auto_min['price']:,.2f} at "
+                f"{auto_min['weight']:.2f}%</div>",
+                unsafe_allow_html=True)
+            # Persist so the Master Dashboard and other views see the same figure
+            if abs(new_amount - float(sc["total_investable_amount"] or 0)) >= 1:
+                db.update_smallcase(sc_id, total_investable_amount=new_amount)
+        else:
+            new_amount = st.number_input(
+                "Total Investable Amount (₹)",
+                value=float(sc["total_investable_amount"]),
+                min_value=0.0, step=10000.0, key=f"amt_{sc_id}",
+            )
+            if new_amount != sc["total_investable_amount"]:
+                db.update_smallcase(sc_id, total_investable_amount=new_amount)
+                st.rerun()
     with col_s2:
         if is_design:
             if st.button("🚀 Deploy (Go Live)", key=f"deploy_{sc_id}"):
                 db.deploy_smallcase(sc_id)
                 st.success("Deployed! Refresh to see changes.")
                 st.rerun()
-        else:
+        elif not auto_min:
             st.markdown("<br>", unsafe_allow_html=True)
             if st.button("📈 Sync to Market Value", key=f"sync_{sc_id}",
                          help="Update Investable Amount to current portfolio market value"):
